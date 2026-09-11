@@ -10,7 +10,10 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -69,5 +72,46 @@ public class MessageController {
         List<Message> history = messageService.loadHistory(roomId, limit);
         log.info("Verlauf geliefert: Raum {}, {} Nachrichten", roomId, history.size());
         return history;
+    }
+
+    /**
+     * Nimmt eine Nachricht entgegen und gibt sie an Kafka weiter.
+     *
+     * Die Antwort ist 202 Accepted und nicht 201 Created: wir haben die Nachricht
+     * angenommen und weitergegeben, gespeichert ist sie in diesem Moment noch nicht.
+     * 201 wuerde etwas versprechen, was noch nicht stimmt.
+     */
+    @Operation(
+            summary = "Nachricht senden",
+            description = "Nimmt eine Nachricht an und schreibt sie auf das Kafka-Topic "
+                        + "'chat.messages'. Die Antwort kommt, sobald Kafka den Empfang bestaetigt "
+                        + "hat. Gespeichert wird die Nachricht kurz danach vom batch-service - sie "
+                        + "erscheint also erst mit kleiner Verzoegerung im Verlauf.")
+    @ApiResponse(responseCode = "202", description = "Nachricht angenommen und auf das Topic geschrieben")
+    @ApiResponse(responseCode = "400", description = "roomId fehlt oder der Text ist leer")
+    @ApiResponse(responseCode = "503", description = "Kafka hat nicht rechtzeitig bestaetigt - bitte spaeter erneut senden")
+    @PostMapping
+    public ResponseEntity<Message> send(@RequestBody NewMessage incoming) {
+
+        log.info("Sendeanfrage erhalten: Raum {}, Absender {}", incoming.roomId(), incoming.sender());
+
+        // Eingaben pruefen, bevor irgendetwas den Dienst verlaesst.
+        if (incoming.roomId() == null) {
+            log.warn("Sendeanfrage ohne roomId abgelehnt");
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "roomId fehlt");
+        }
+        if (incoming.sender() == null || incoming.sender().isBlank()) {
+            log.warn("Sendeanfrage ohne sender fuer Raum {} abgelehnt", incoming.roomId());
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "sender fehlt");
+        }
+        if (incoming.text() == null || incoming.text().isBlank()) {
+            log.warn("Sendeanfrage mit leerem Text fuer Raum {} abgelehnt", incoming.roomId());
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "text darf nicht leer sein");
+        }
+
+        Message published = messageService.sendMessage(incoming);
+
+        log.info("Sendeanfrage beantwortet: Nachricht {} angenommen", published.id());
+        return ResponseEntity.accepted().body(published);
     }
 }
