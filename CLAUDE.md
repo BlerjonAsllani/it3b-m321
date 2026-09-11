@@ -1,6 +1,6 @@
 # M321 — Lernprojekt IT3b
 
-Unterrichtsprojekt der Klasse IT3b an der Schule Benedict. Der Code wird von Lernenden gelesen, verstanden und **mündlich erklärt**.
+Unterrichtsprojekt der Klasse IT3b. Der Code wird von Lernenden gelesen, verstanden und **mündlich erklärt**.
 Massstab ist nicht Eleganz, sondern: kann eine lernende Person jede Zeile vorlesen und sagen, was sie tut?
 
 ## Codestil
