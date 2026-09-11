@@ -24,7 +24,7 @@ Diese Punkte gelten für **jede** Aufgabe in diesem Plan.
 
 | Vorgabe | Wert |
 |---|---|
-| Java | **21** (`/Users/manuelpritz/Library/Java/JavaVirtualMachines/temurin-21.0.5/Contents/Home`) — nicht das System-JDK 25 |
+| Java | **21** — nicht ein neueres System-JDK; `java -version` muss 21 zeigen |
 | Spring Boot | **3.5.16** (`spring-boot-starter-parent`) |
 | springdoc-openapi | **2.9.0** (`springdoc-openapi-starter-webmvc-ui`) — diese Version wird gegen Boot 3.5.16 gebaut |
 | Basis-Paket | `ch.benedict.m321.chat` |
@@ -281,7 +281,7 @@ class ChatServiceApplicationTest {
 
 ```bash
 cd it3b-m321/chat-service
-export JAVA_HOME=/Users/manuelpritz/Library/Java/JavaVirtualMachines/temurin-21.0.5/Contents/Home
+export JAVA_HOME=<Pfad-zu-deinem-JDK-21>   # nur nötig, wenn java -version nicht 21 zeigt
 mvn test
 ```
 
@@ -610,7 +610,7 @@ spring:
 
 ```bash
 cd chat-service
-export JAVA_HOME=/Users/manuelpritz/Library/Java/JavaVirtualMachines/temurin-21.0.5/Contents/Home
+export JAVA_HOME=<Pfad-zu-deinem-JDK-21>   # nur nötig, wenn java -version nicht 21 zeigt
 mvn test
 ```
 
@@ -729,7 +729,7 @@ class MessageControllerTest {
 
 ```bash
 cd chat-service
-export JAVA_HOME=/Users/manuelpritz/Library/Java/JavaVirtualMachines/temurin-21.0.5/Contents/Home
+export JAVA_HOME=<Pfad-zu-deinem-JDK-21>   # nur nötig, wenn java -version nicht 21 zeigt
 mvn test
 ```
 
@@ -1078,7 +1078,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 
 ```bash
 cd chat-service
-export JAVA_HOME=/Users/manuelpritz/Library/Java/JavaVirtualMachines/temurin-21.0.5/Contents/Home
+export JAVA_HOME=<Pfad-zu-deinem-JDK-21>   # nur nötig, wenn java -version nicht 21 zeigt
 mvn test
 ```
 
