@@ -115,7 +115,7 @@ Das Verzeichnis ist noch kein Git-Repository. Ohne Versionierung gibt es keine C
 Zurück.
 
 ```bash
-cd /Users/manuelpritz/Source/Java/Benedict/2026/IT3b/M321/it3b-m321
+cd it3b-m321
 git init
 ```
 
@@ -280,7 +280,7 @@ class ChatServiceApplicationTest {
 - [ ] **Schritt 6: Test laufen lassen — er muss fehlschlagen**
 
 ```bash
-cd /Users/manuelpritz/Source/Java/Benedict/2026/IT3b/M321/it3b-m321/chat-service
+cd it3b-m321/chat-service
 export JAVA_HOME=/Users/manuelpritz/Library/Java/JavaVirtualMachines/temurin-21.0.5/Contents/Home
 mvn test
 ```
@@ -392,7 +392,7 @@ Anwendung mit `Ctrl+C` beenden.
 - [ ] **Schritt 11: Commit**
 
 ```bash
-cd /Users/manuelpritz/Source/Java/Benedict/2026/IT3b/M321/it3b-m321
+cd it3b-m321
 git add .gitignore chat-service/
 git commit -m "feat(chat-service): Projekt aufsetzen, Swagger UI erreichbar"
 ```
@@ -540,7 +540,7 @@ INSERT INTO message (id, room_id, sender, text, sent_at) VALUES
 - [ ] **Schritt 4: Compose starten und Schema prüfen**
 
 ```bash
-cd /Users/manuelpritz/Source/Java/Benedict/2026/IT3b/M321/it3b-m321
+cd it3b-m321
 docker compose up -d
 docker compose ps
 docker exec -it m321-postgres psql -U chat -d chat -c "\dt"
@@ -639,7 +639,7 @@ Anwendung mit `Ctrl+C` beenden.
 - [ ] **Schritt 9: Commit**
 
 ```bash
-cd /Users/manuelpritz/Source/Java/Benedict/2026/IT3b/M321/it3b-m321
+cd it3b-m321
 git add docker-compose.yml db/ chat-service/
 git commit -m "feat(infra): PostgreSQL und RabbitMQ in docker-compose, Schema und Demo-Daten"
 ```
@@ -992,7 +992,7 @@ In der Konsole müssen dabei die Log-Zeilen `Verlauf abgerufen`, `Lese die letzt
 - [ ] **Schritt 9: Commit**
 
 ```bash
-cd /Users/manuelpritz/Source/Java/Benedict/2026/IT3b/M321/it3b-m321
+cd it3b-m321
 git add chat-service/
 git commit -m "feat(chat-service): GET /api/messages liest den Verlauf, dokumentiert in Swagger"
 ```
@@ -1346,7 +1346,7 @@ in der Datenbank. Genau das ist der Beweis, dass Senden und Speichern getrennt s
 - [ ] **Schritt 9: Commit**
 
 ```bash
-cd /Users/manuelpritz/Source/Java/Benedict/2026/IT3b/M321/it3b-m321
+cd it3b-m321
 git add chat-service/
 git commit -m "feat(chat-service): POST /api/messages publiziert auf den Fanout-Exchange"
 ```
