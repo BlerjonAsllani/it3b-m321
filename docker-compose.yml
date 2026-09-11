@@ -1,0 +1,58 @@
+# Infrastruktur fuer den Bootstrap: Datenbank und Message Broker.
+# Der chat-service laeuft in dieser Phase noch auf dem Host (aus der IDE).
+services:
+
+  postgres:
+    image: postgres:17-alpine
+    container_name: m321-postgres
+    environment:
+      POSTGRES_DB: chat
+      POSTGRES_USER: chat
+      POSTGRES_PASSWORD: chat
+    ports:
+      # NUR fuer den Bootstrap veroeffentlicht - siehe Hinweis im Plan.
+      - "5432:5432"
+    volumes:
+      # Alle .sql-Dateien hier drin fuehrt das Postgres-Image beim ERSTEN Start
+      # in alphabetischer Reihenfolge aus. Danach nie wieder.
+      - ./db:/docker-entrypoint-initdb.d:ro
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - chat-net
+
+  kafka:
+    image: apache/kafka:4.0.0
+    container_name: m321-kafka
+    ports:
+      # NUR fuer den Bootstrap veroeffentlicht - siehe Hinweis im Plan.
+      - "9092:9092"
+    environment:
+      # --- KRaft: dieser eine Container ist Broker UND Controller zugleich ---
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+
+      # Worauf der Broker HOERT (im Container).
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+
+      # Welche Adresse der Broker den Clients NENNT. Siehe Warnung unten -
+      # das ist die haeufigste Fehlerquelle bei Kafka in Docker.
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+
+      # Ein einzelner Broker kann nichts replizieren - daher ueberall 1.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # Ohne das wartet die erste Consumer-Gruppe beim Start 3 Sekunden.
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    networks:
+      - chat-net
+
+volumes:
+  postgres-data:
+
+networks:
+  chat-net:
+    driver: bridge

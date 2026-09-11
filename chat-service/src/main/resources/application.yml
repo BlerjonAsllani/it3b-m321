@@ -5,6 +5,30 @@ spring:
   application:
     name: chat-service
 
+  # Verbindung zur Datenbank aus docker-compose.
+  # Zugangsdaten stehen hier im Klartext, weil das eine Uebungsumgebung ist.
+  datasource:
+    url: jdbc:postgresql://localhost:5432/chat
+    username: chat
+    password: chat
+
+  kafka:
+    # Einstiegspunkt. Von hier holt sich der Client die echten Broker-Adressen
+    # (siehe Hinweis zu advertised.listeners in Task 2).
+    bootstrap-servers: localhost:9092
+    producer:
+      # Schluessel und Wert gehen beide als Text raus: der Schluessel ist die roomId,
+      # der Wert die Nachricht als JSON-Text. Das JSON erzeugen wir selbst im
+      # MessageService - warum, steht in Task 4, Schritt 3.
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      properties:
+        # Wie lange send() hoechstens blockieren darf, wenn der Broker gar nicht
+        # erreichbar ist. Standard waeren 60 Sekunden - so lange haengt sonst jede
+        # Sendeanfrage. Die eckigen Klammern sorgen dafuer, dass Spring die Punkte
+        # im Namen stehen laesst, statt sie als Verschachtelung zu lesen.
+        "[max.block.ms]": 5000
+
 # Swagger UI liegt unter http://localhost:8080/swagger-ui.html
 springdoc:
   swagger-ui:

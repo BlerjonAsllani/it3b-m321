@@ -44,6 +44,27 @@
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
 
+        <!-- JdbcTemplate: SQL direkt, ohne ORM. Wir sehen jede Abfrage im Klartext. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-jdbc</artifactId>
+        </dependency>
+
+        <!-- Treiber fuer PostgreSQL. Wird nur zur Laufzeit gebraucht, nicht beim Kompilieren. -->
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!-- Spring Kafka: die Anbindung an Kafka (Topic, Partition, Offset, send).
+             Anders als bei den Starters oben steht hier die groupId
+             org.springframework.kafka - die Version kommt trotzdem vom Eltern-POM. -->
+        <dependency>
+            <groupId>org.springframework.kafka</groupId>
+            <artifactId>spring-kafka</artifactId>
+        </dependency>
+
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
