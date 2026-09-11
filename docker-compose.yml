@@ -1,5 +1,5 @@
-# Infrastruktur fuer den Bootstrap: Datenbank und Message Broker.
-# Der chat-service laeuft in dieser Phase noch auf dem Host (aus der IDE).
+# Infrastruktur: Datenbank und Message Broker.
+# chat-service und batch-service laufen in dieser Phase noch auf dem Host (aus der IDE).
 services:
 
   postgres:
@@ -53,11 +53,21 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       # Ohne das wartet die erste Consumer-Gruppe beim Start 3 Sekunden.
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # Topics entstehen nur ausdruecklich, ueber die NewTopic-Beans im chat-service und
+      # im batch-service. Ohne diese Zeile legt Kafka ein unbekanntes Topic still selbst an,
+      # sobald ein Client danach fragt - mit Standardwerten (1 Partition) statt unseren 6.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      # Hier speichert Kafka Topics und die Offsets der Consumer-Gruppen. Der Ordner liegt
+      # auf dem Volume kafka-data - so ueberlebt beides ein "docker compose down".
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    volumes:
+      - kafka-data:/var/lib/kafka/data
     networks:
       - chat-net
 
 volumes:
   postgres-data:
+  kafka-data:
 
 networks:
   chat-net:
