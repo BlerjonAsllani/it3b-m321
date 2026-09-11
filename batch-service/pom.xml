@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!-- Wie beim chat-service: der Eltern-POM von Spring Boot legt die Versionen aller
+         Spring-Bibliotheken fest, deshalb steht unten meist keine Versionsnummer. -->
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.5.16</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>ch.benedict.m321</groupId>
+    <artifactId>batch-service</artifactId>
+    <version>0.1.0</version>
+    <name>batch-service</name>
+    <description>Liest Nachrichten aus Kafka und speichert sie gebuendelt in PostgreSQL (Modul M321)</description>
+
+    <properties>
+        <java.version>21</java.version>
+    </properties>
+
+    <dependencies>
+        <!-- Kein Web-Starter: der batch-service hat keine Weboberflaeche. -->
+
+        <!-- JdbcTemplate: SQL im Klartext, auch fuer das gebuendelte batchUpdate. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-jdbc</artifactId>
+        </dependency>
+
+        <!-- Jackson samt dem ObjectMapper von Spring Boot, der ISO-Zeitpunkte liest. Der
+             chat-service bekommt ihn ueber den Web-Starter mit; der batch-service hat keinen
+             und braucht ihn deshalb ausdruecklich. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-json</artifactId>
+        </dependency>
+
+        <!-- Treiber fuer PostgreSQL. Wird nur zur Laufzeit gebraucht. -->
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!-- Spring Kafka: Listener, Acknowledgment, KafkaTemplate fuer das Dead-Letter-Topic. -->
+        <dependency>
+            <groupId>org.springframework.kafka</groupId>
+            <artifactId>spring-kafka</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- Baut ein ausfuehrbares JAR und erlaubt "mvn spring-boot:run" -->
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>

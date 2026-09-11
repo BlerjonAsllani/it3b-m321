@@ -1,0 +1,50 @@
+spring:
+  application:
+    name: batch-service
+
+  # Verbindung zur Datenbank aus docker-compose.
+  # Zugangsdaten stehen hier im Klartext, weil das eine Uebungsumgebung ist.
+  datasource:
+    # reWriteBatchedInserts=true: ohne diesen Zusatz schickt der PostgreSQL-Treiber die
+    # Zeilen eines batchUpdate trotzdem einzeln ueber die Leitung - das Buendeln waere umsonst.
+    url: jdbc:postgresql://localhost:5432/chat?reWriteBatchedInserts=true
+    username: chat
+    password: chat
+    hikari:
+      # So lange wartet der Verbindungspool hoechstens auf eine Datenbankverbindung (Standard:
+      # 30 Sekunden). Ist Postgres weg, merkt der Listener das so nach 5 statt nach 30 Sekunden.
+      connection-timeout: 5000
+
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      # Hat die Gruppe noch keine gespeicherte Position (allererster Start), liest sie das
+      # Topic von Anfang an - auch Nachrichten, die gesendet wurden, bevor es den
+      # batch-service gab.
+      auto-offset-reset: earliest
+      # Offsets speichert nur der Listener selbst, nach dem Schreiben in die Datenbank.
+      enable-auto-commit: false
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      # Die drei Werte zusammen naehern "500 Stueck oder 200 ms" an (PLANUNG.md 2.3).
+      # Startwerte - nachgemessen mit scripts/load-test.sh.
+      max-poll-records: 500
+      fetch-max-wait: 200ms
+      fetch-min-size: 100KB
+    producer:
+      # Nur fuer das Dead-Letter-Topic: Schluessel und Wert gehen unveraendert als Text weiter.
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      properties:
+        # So lange darf send() hoechstens blockieren, wenn der Broker nicht erreichbar ist.
+        # Die eckigen Klammern sorgen dafuer, dass Spring die Punkte im Namen stehen laesst.
+        "[max.block.ms]": 5000
+    listener:
+      # Ein Offset wird erst gespeichert, wenn der Listener acknowledge() aufruft.
+      ack-mode: manual
+
+logging:
+  level:
+    # INFO: eine Zeile pro Paket. Fuer jede einzelne Zeile auf DEBUG stellen - aber nicht
+    # waehrend einer Messung: 100 000 Logzeilen verfaelschen das Ergebnis.
+    ch.benedict.m321: INFO
