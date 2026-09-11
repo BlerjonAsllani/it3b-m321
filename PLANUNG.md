@@ -11,11 +11,11 @@ Keycloak, docker-compose, internes Docker-Netzwerk.
 | Bereich | Entscheidung | Warum |
 |---|---|---|
 | Sprache | **Java 21** | Vorgabe aus der Skizze |
-| Backend-Framework | **Spring Boot 3.x** | Bringt REST, SSE, AMQP, OAuth2-Resource-Server und JPA mit, ohne Fremdbibliotheken |
+| Backend-Framework | **Spring Boot 3.x** | Bringt REST, SSE, Kafka-Client, OAuth2-Resource-Server und JPA mit, ohne Fremdbibliotheken |
 | Web-UI | **React** (eigenes UI-Modul), Nachrichten per **SSE** | Eigenständig deploybarer Service — passt zum Modulthema Microservices |
 | Desktop-UI | **JavaFX-Client** | Zweiter Client gegen dieselbe API, zeigt Client-Unabhängigkeit des Backends |
 | Login | **Keycloak** (OIDC) | Vorgabe |
-| Message Queue | **RabbitMQ** | Queues sichtbar in der Management-UI, Lehrplan-Vokabular, wenig Code |
+| Message Broker | **Apache Kafka** (KRaft-Modus, ohne ZooKeeper) | Industriell der Standard für Event-Streaming; Topics/Partitions/Consumer-Groups sind Lehrplan-Vokabular *(geändert — siehe Verlauf)* |
 | Datenbank | **PostgreSQL** | Standard, gut dokumentiert. Schreibzugriff ausschliesslich gebündelt über den `batch-service` *(änderbar)* |
 | Einstiegspunkt | **nginx** als Reverse Proxy | Einziger nach aussen offener Port |
 | Betrieb | **docker-compose**, ein internes Netzwerk `chat-net` | Vorgabe |
@@ -33,16 +33,16 @@ flowchart TB
     chat["chat-service<br/><small>REST · SSE · JWT-Prüfung</small>"]
     batch["batch-service<br/><small>einziger Schreiber</small>"]
     kc["keycloak<br/><small>Login / OIDC</small>"]
-    mq["rabbitmq<br/><small>Fanout-Exchange</small>"]
+    kafka["kafka<br/><small>Topic chat.messages</small>"]
     db[("postgres<br/><small>Nachrichten</small>")]
 
     gw -->|"/api · /stream"| chat
     gw -->|"/auth"| kc
     chat -->|"Token prüfen (JWKS)"| kc
-    chat -->|"publish"| mq
+    chat -->|"produce"| kafka
     chat -.->|"Verlauf LESEN"| db
-    mq -.->|"Queue chat.live<br/>→ SSE"| chat
-    mq -->|"Queue chat.persist"| batch
+    kafka -.->|"Consumer-Group je Instanz<br/>→ SSE"| chat
+    kafka -->|"Consumer-Group batch-service"| batch
     batch ==>|"Batch-INSERT<br/>500 Zeilen"| db
   end
 
@@ -70,38 +70,45 @@ Liefert das React-Bundle aus und leitet weiter:
 | `/auth/…` | `keycloak:8080` |
 
 **chat-service** — das Backend aus der Skizze. Aufgaben:
-- REST-Endpunkt `POST /api/messages` — Nachricht entgegennehmen und **nur** auf den
-  RabbitMQ-Exchange publizieren. Es schreibt selbst **nicht** in die Datenbank.
+- REST-Endpunkt `POST /api/messages` — Nachricht entgegennehmen und **nur** auf das
+  Kafka-Topic `chat.messages` schreiben (Schlüssel: `roomId`). Es schreibt selbst **nicht** in die
+  Datenbank.
 - `GET /api/messages?roomId=…` — Verlauf der letzten N Nachrichten aus der Datenbank **lesen**.
-- `GET /stream` — SSE-Verbindung. Der Service hört per `@RabbitListener` auf seiner Live-Queue
-  und schiebt jede eintreffende Nachricht in alle offenen SSE-Verbindungen.
+- `GET /stream` — SSE-Verbindung. Der Service liest per `@KafkaListener` in einer **eigenen,
+  flüchtigen Consumer-Gruppe** vom Topic und schiebt jede eintreffende Nachricht in alle offenen
+  SSE-Verbindungen dieser Instanz.
 - **Raumverwaltung** — `POST /api/rooms` legt einen Raum an, `POST /api/rooms/{id}/members`
   lädt jemanden per Benutzernamen ein, `GET /api/rooms` listet die eigenen Räume.
-  Diese drei schreiben **direkt** in die Datenbank, ohne Queue und ohne Bündeln (Abschnitt 2.4).
+  Diese drei schreiben **direkt** in die Datenbank, ohne Kafka und ohne Bündeln (Abschnitt 2.4).
 - Prüft bei jedem Aufruf das JWT von Keycloak (OAuth2 Resource Server).
 
 **batch-service** — läuft ohne Web-Oberfläche und **genau einmal** (eine Instanz). Er ist der
 **einzige Dienst, der in die Nachrichtentabelle schreibt**:
-- Liest fortlaufend aus der Queue `chat.persist` und schreibt **gebündelt** in die Datenbank
-  (Details in Abschnitt 2.3). Das ist seine Hauptaufgabe.
+- Liest fortlaufend als Consumer-Gruppe `batch-service` vom Topic `chat.messages` und schreibt
+  **gebündelt** in die Datenbank (Details in Abschnitt 2.3). Das ist seine Hauptaufgabe.
 - Zusätzlich zeitgesteuert (`@Scheduled`): Nachrichten älter als 30 Tage archivieren bzw. löschen,
   nächtliche Statistik (Nachrichten pro Raum, aktive Nutzer) in eine Tabelle schreiben.
-- Meldet das Statistik-Ergebnis an RabbitMQ, damit es im Chat als Systemmeldung erscheinen kann.
+- Meldet das Statistik-Ergebnis an Kafka, damit es im Chat als Systemmeldung erscheinen kann.
 
 ### 2.2 Nachrichtenfluss (der wichtigste Ablauf im Modul)
 
 1. Der Client sendet `POST /api/messages` mit Bearer-Token an das Gateway.
 2. Das Gateway leitet an `chat-service` weiter.
-3. `chat-service` prüft das Token, vergibt eine UUID und einen Zeitstempel — und publiziert
-   die Nachricht auf den **Fanout-Exchange** `chat.messages`. Danach antwortet es dem Client.
-   **Keine Datenbank im Anfrageweg.**
-4. Am Exchange hängen zwei Arten von Queues:
-   - `chat.live.<instanz>` — eine pro `chat-service`-Instanz, flüchtig. Für die Anzeige.
-   - `chat.persist` — eine einzige, dauerhafte Queue. Für das Speichern.
+3. `chat-service` prüft das Token, vergibt eine UUID und einen Zeitstempel — und schreibt die
+   Nachricht mit `roomId` als **Schlüssel** auf das Topic `chat.messages`. Danach antwortet es dem
+   Client. **Keine Datenbank im Anfrageweg.**
+4. Am Topic hängen zwei Arten von Consumer-Gruppen — Kafka liefert jeder eigenen Gruppe eine
+   vollständige Kopie des Topics, das übernimmt die Rolle, die bei RabbitMQ ein Fanout-Exchange
+   hatte:
+   - `chat-live-<zufällige-id>` — eine **eigene, flüchtige** Gruppe pro `chat-service`-Instanz.
+     Startet immer bei `auto.offset.reset: latest`, liest also nie den Verlauf, sondern nur, was
+     ab jetzt eintrifft. Für die Anzeige.
+   - `batch-service` — eine einzige, **dauerhafte** Gruppe mit committeten Offsets. Für das
+     Speichern.
 5. Jede `chat-service`-Instanz schiebt ihre Kopie sofort über SSE an ihre Clients.
 6. Der `batch-service` sammelt seine Kopien und schreibt sie gebündelt in PostgreSQL.
 
-Schritt 4 ist der Grund für die Queue — gleich zweifach:
+Schritt 4 ist der Grund für Kafka statt eines einfachen Punkt-zu-Punkt-Aufrufs — gleich zweifach:
 **Verteilung** (bei zwei Backend-Instanzen sieht ein Nutzer an Instanz A auch Nachrichten von
 Instanz B) und **Entkopplung** (die Anzeige wartet nicht auf die Datenbank).
 
@@ -111,7 +118,7 @@ sequenceDiagram
   participant C as Client A
   participant G as gateway
   participant A as chat-service<br/>Instanz A
-  participant MQ as rabbitmq
+  participant K as kafka
   participant B as chat-service<br/>Instanz B
   participant C2 as Client B
   participant BS as batch-service
@@ -120,17 +127,17 @@ sequenceDiagram
   C->>G: POST /api/messages + Bearer-Token
   G->>A: weiterleiten
   A->>A: Token prüfen, UUID + Zeitstempel setzen
-  A->>MQ: publish auf Exchange chat.messages
+  A->>K: send(topic=chat.messages, key=roomId)
   A-->>C: 202 Accepted
-  Note over MQ: Fanout:<br/>je Queue eine Kopie
-  MQ-->>A: Queue chat.live.A
-  MQ-->>B: Queue chat.live.B
-  MQ-->>BS: Queue chat.persist
+  Note over K: jede Consumer-Gruppe<br/>bekommt eine eigene Kopie
+  K-->>A: Gruppe chat-live-A
+  K-->>B: Gruppe chat-live-B
+  K-->>BS: Gruppe batch-service
   A-->>C: SSE
   B-->>C2: SSE
-  Note over BS: sammeln:<br/>500 oder 200 ms
+  Note over BS: sammeln:<br/>bis zu 500 oder ~200 ms
   BS->>DB: EIN Batch-INSERT mit 500 Zeilen
-  BS->>MQ: ACK für alle 500
+  BS->>K: Offsets committen für alle 500
 ```
 
 ### 2.3 Schreibpfad: warum gebündelt statt einzeln
@@ -140,81 +147,94 @@ sequenceDiagram
 einen Parse-Vorgang und einen eigenen Transaktions-Commit. Die Datenbank ist damit lange vor
 der Anwendung am Anschlag — und der Nutzer wartet beim Senden mit.
 
-**Die Lösung.** Der `batch-service` sammelt, was aus `chat.persist` hereinkommt, und schreibt
-in Paketen:
+**Die Lösung.** Der `batch-service` sammelt, was aus der Consumer-Gruppe `batch-service`
+hereinkommt, und schreibt in Paketen:
 
 | Regel | Wert | Warum |
 |---|---|---|
-| Paketgrösse | 500 Nachrichten | Ein `INSERT` mit 500 Zeilen statt 500 Anweisungen |
-| Zeitlimit | 200 ms | Damit auch bei wenig Betrieb nichts liegen bleibt |
+| Paketgrösse (Obergrenze) | 500 Nachrichten | Ein `INSERT` mit 500 Zeilen statt 500 Anweisungen |
+| Wartezeit | ~200 ms | Damit auch bei wenig Betrieb nichts liegen bleibt |
 | Ausgelöst durch | **was zuerst eintritt** | Voll oder Zeit abgelaufen — dann wird geschrieben |
 
 Rechenbeispiel für die Klasse: 100 000 ÷ 500 = **200 Schreibvorgänge pro Sekunde** statt
 100 000. Das ist Faktor 500 weniger Roundtrips, bei identischer Datenmenge.
 
 **Wie das konkret gebaut wird:**
-- Spring AMQP kann Consumer-seitig bündeln: `setConsumerBatchEnabled(true)`,
-  `setBatchSize(500)`, `setReceiveTimeout(200)`. Die Listener-Methode bekommt dann eine
-  `List<Message>` statt einer einzelnen Nachricht — genau die Semantik «500 Stück oder 200 ms».
+- Spring Kafka kann Consumer-seitig bündeln: `@KafkaListener(..., batch = "true")` liefert der
+  Listener-Methode eine `List<Message>` statt einer einzelnen Nachricht.
+- **Wichtig, ehrlich benannt:** Kafka kennt — anders als Spring AMQP bei RabbitMQ — keine
+  deklarative Einstellung «500 Stück oder 200 ms». `max.poll.records: 500` ist nur eine
+  **Obergrenze** pro Abholung, keine Mindestmenge; wie lange der Broker auf genug Daten wartet,
+  bevor er antwortet, wird über `fetch.min.bytes` und `fetch.max.wait.ms: 200` angenähert.
+  Das Ergebnis liegt nahe an «500 oder 200 ms», ist aber eine Annäherung über zwei getrennte
+  Broker-Einstellungen, keine einzelne Garantie.
 - Geschrieben wird mit `JdbcTemplate.batchUpdate(...)`. In der JDBC-URL muss
   `reWriteBatchedInserts=true` stehen, sonst schickt der PostgreSQL-Treiber die Zeilen trotzdem
   einzeln über die Leitung.
-- **Prefetch ≥ Paketgrösse.** Steht `prefetch` auf 250, kann der Consumer nie 500 Nachrichten
-  sammeln und läuft dauernd ins Zeitlimit. Ein klassischer Anfängerfehler.
+- **Offsets erst nach dem Commit.** `spring.kafka.listener.ack-mode: MANUAL` — der Listener
+  committet die Offsets seiner Gruppe erst, nachdem `batchUpdate` erfolgreich war. Das ist die
+  genaue Entsprechung zum «ACK erst nach dem Commit» bei RabbitMQ.
 
 **Was dabei schiefgehen kann — und die Antwort darauf:**
 
 | Risiko | Antwort |
 |---|---|
-| Absturz mitten im Paket → Nachrichten weg | **ACK erst nach dem Commit** der Datenbank-Transaktion. Ohne ACK stellt RabbitMQ das ganze Paket erneut zu. |
+| Absturz mitten im Paket → Nachrichten weg | **Offset-Commit erst nach dem Commit** der Datenbank-Transaktion. Ohne Commit liest die Gruppe beim nächsten Poll ab derselben Stelle erneut. |
 | Erneute Zustellung → Nachricht doppelt in der DB | Die UUID kommt vom `chat-service` und ist der Primärschlüssel. `ON CONFLICT (id) DO NOTHING` verwirft die Dublette. |
-| Reihenfolge | Der Zeitstempel wird im `chat-service` gesetzt, nicht von der Datenbank. Damit stimmt die Reihenfolge auch bei mehreren Schreibern. |
-| Datenbank kommt nicht nach | Die Queue `chat.persist` wächst — **sichtbar** in der RabbitMQ-Management-UI. Genau das ist die Lehrstunde zu Backpressure. |
+| Reihenfolge | Zwei Gründe gemeinsam: der Zeitstempel wird im `chat-service` gesetzt, nicht von der Datenbank — und **Kafka garantiert Reihenfolge innerhalb einer Partition**. Weil `roomId` der Schlüssel ist, landen alle Nachrichten eines Raums garantiert in derselben Partition und damit in Sendereihenfolge. Über Räume hinweg gibt es keine Ordnungsgarantie — das ist unproblematisch, weil Räume unabhängig sind. |
+| Datenbank kommt nicht nach | Der **Consumer-Lag** der Gruppe `batch-service` wächst — **sichtbar** über `kafka-consumer-groups.sh --describe --group batch-service` oder eine Kafka-UI. Genau das ist die Lehrstunde zu Backpressure. |
 
-**Der Preis, ehrlich benannt.** Eine gesendete Nachricht steht bis zu 200 ms später in der
+**Der Preis, ehrlich benannt.** Eine gesendete Nachricht steht bis zu ~200 ms später in der
 Datenbank. Für die Anzeige spielt das keine Rolle — der SSE-Weg läuft völlig unabhängig und
 ist sofort da. Nur wer in genau diesem Moment den Verlauf neu lädt, sieht die letzten
 Millisekunden noch nicht. Das ist bewusst akzeptiert.
 
 **Und die ehrliche Einordnung zur Zahl 100 000/s:** bei dieser Last wäre nicht mehr die
-Datenbank der Engpass, sondern der Broker und das Verteilen an die SSE-Verbindungen. Das
-Bündeln löst genau ein Problem — das der Schreiblast. Es macht die App nicht automatisch
-skalierbar.
-
+Datenbank der Engpass, sondern das Verteilen an die SSE-Verbindungen. Das Bündeln löst genau
+ein Problem — das der Schreiblast. Es macht die App nicht automatisch skalierbar.
 
 ### 2.4 Rückstau: was passiert, wenn der Schreiber nicht nachkommt
 
 Der `batch-service` läuft **einmal**. Eine Instanz ist damit die Obergrenze für den Durchsatz —
 schafft sie 200 Pakete pro Sekunde, ist bei 100 000 Nachrichten pro Sekunde Schluss. Wird mehr
-gesendet als geschrieben, wächst die Queue `chat.persist`. Das ist kein Fehler, das ist die
-Aufgabe einer Queue. Drei Fälle muss man aber auseinanderhalten:
+gesendet als geschrieben, wächst der **Consumer-Lag** der Gruppe `batch-service` — das ist kein
+Fehler, das ist die Aufgabe eines Logs, das schneller geschrieben als gelesen werden darf. Drei
+Fälle muss man aber auseinanderhalten, und hier unterscheidet sich Kafka am deutlichsten von
+RabbitMQ:
 
 | Fall | Was passiert | Was wir tun |
 |---|---|---|
-| **Kurzer Rückstau** — eine Lastspitze | Queue wächst und leert sich wieder | Nichts. Genau dafür ist die Queue da. |
-| **Dauerhafter Rückstau** — Datenbank langsam oder weg | Queue wächst, bis der Speicher des Brokers voll ist | RabbitMQ bremst von sich aus die Absender aus (*Flow Control*): der `publish` im `chat-service` blockiert. Nach einem Zeitlimit antwortet `POST /api/messages` mit `503`. Der Chat nimmt sichtbar nichts mehr an. |
-| **Giftnachricht** — eine einzelne Nachricht lässt sich nie schreiben | Kein ACK, RabbitMQ stellt endlos erneut zu, die Queue kommt nie leer | Quorum-Queue mit `x-delivery-limit: 3`. Nach drei Versuchen wandert die Nachricht in die Dead-Letter-Queue `chat.persist.dlq` und kann dort angeschaut werden. |
+| **Kurzer Rückstau** — eine Lastspitze | Lag wächst und baut sich wieder ab | Nichts. Genau dafür ist der Puffer da. |
+| **Dauerhafter Rückstau** — Datenbank langsam oder weg | Lag wächst unbegrenzt weiter | **Kafka blockiert `chat-service` beim Senden nicht von sich aus** — anders als RabbitMQ hat ein Topic keine Speichergrenze, die den Produzenten bremst. Der Log wächst, solange `retention.ms`/`retention.bytes` es zulassen. Ohne eigenes Zutun laufen alte, noch nicht gespeicherte Nachrichten irgendwann aus der Retention und sind **verloren** — genau das, was wir bei RabbitMQ ausdrücklich ausschliessen wollten. |
+| **Giftnachricht** — eine einzelne Nachricht lässt sich nie schreiben | Ohne Offset-Commit liest der Consumer dieselbe Nachricht immer wieder | Spring Kafka `@RetryableTopic` (nicht-blockierende Wiederholung, 3 Versuche) mit `DeadLetterPublishingRecoverer`. Nach drei Versuchen wandert die Nachricht auf das Topic `chat.messages-dlt` und kann dort angeschaut werden. |
 
-**Bewusst nicht gewählt: `x-max-length` mit «ältestes wegwerfen» auf `chat.persist`.** Das
-begrenzt zwar den Speicher, löscht dafür aber still Nachrichten aus dem Verlauf — und niemand
-merkt es. Ein Chat, der sichtbar keine neuen Nachrichten mehr annimmt, ist besser als einer,
-dessen Verlauf lautlos Löcher bekommt.
+**Der ehrliche Unterschied zu RabbitMQ, ausdrücklich benannt.** RabbitMQ bremst überlastete
+Producer automatisch (*Flow Control*) — Kafka nicht. Um dieselbe Garantie zu bekommen («lieber
+sichtbar blockieren als still Nachrichten verlieren»), müsste `chat-service` den Consumer-Lag von
+`batch-service` selbst beobachten (Kafka `AdminClient`, `describeConsumerGroups`) und
+`POST /api/messages` ab einer Lag-Schwelle mit `503` ablehnen. Das ist **nicht eingebaut** und
+noch nicht gebaut — siehe offener Punkt in Abschnitt 4. Bis dahin ist eine grosszügige Retention
+auf `chat.messages` (z. B. 7 Tage) die einzige Absicherung: sie verschafft Zeit, verhindert den
+Datenverlust aber nicht endgültig.
 
-**Der interessante Punkt: dieselbe Nachricht, zwei Queues, gegensätzliche Regeln.**
+**Dieselbe Nachricht, zwei Consumer-Strategien, gegensätzliche Regeln.**
 
-| Queue | Wofür | Bei Überlauf |
+| Consumer-Gruppe | Wofür | Verhalten |
 |---|---|---|
-| `chat.persist` | den Verlauf **speichern** | **Nichts wegwerfen.** Lieber blockieren. Dauerhaft (`durable`), Quorum-Queue, DLQ für Giftnachrichten. |
-| `chat.live.<instanz>` | jetzt **anzeigen** | **Wegwerfen ist richtig.** `x-max-length: 1000` (ältestes fliegt raus) und `x-message-ttl: 30000`. Eine 30 Sekunden alte «Live»-Nachricht ist wertlos — wer sie verpasst hat, holt sie mit `GET /api/messages` nach. |
+| `batch-service` | den Verlauf **speichern** | Dauerhaft, committete Offsets, nichts wird übersprungen. Holt nach einem Neustart genau dort weiter, wo sie aufgehört hat. |
+| `chat-live-<instanz>` | jetzt **anzeigen** | Flüchtig, `auto.offset.reset: latest`, keine committeten Offsets. Startet nach jedem Neustart wieder bei «jetzt» — eine 30 Sekunden alte «Live»-Nachricht nachzuliefern wäre ohnehin wertlos. Wer etwas verpasst hat, holt es mit `GET /api/messages` nach. |
 
-Das ist die Lehrstunde dieses Abschnitts: Wie man mit Überlauf umgeht, hängt nicht an der
-Nachricht, sondern daran, **wozu** man sie gerade braucht.
+Das ist die Lehrstunde dieses Abschnitts, nur mit anderem Mechanismus als bei RabbitMQ: Wie man
+mit demselben Datenstrom umgeht, hängt nicht an der Nachricht, sondern daran, **wozu** man sie
+gerade braucht. Bei RabbitMQ war das eine Frage der Queue-Konfiguration (`x-max-length`,
+`x-delivery-limit`); bei Kafka ist es eine Frage der Consumer-Gruppen-Strategie
+(committete vs. nie committete Offsets).
 
-**Ein Haken, der zum Bündeln gehört.** Der Zähler `x-delivery-limit` zählt pro Nachricht — aber
-schiefgehen kann nur das ganze Paket. Eine einzige kaputte Nachricht lässt alle 500 scheitern
-und schickt am Ende alle 500 in die DLQ. Antwort darauf: schlägt ein Paket fehl, schreibt der
-`batch-service` dieses eine Paket **einmalig Zeile für Zeile**. Dann scheitert nur die wirklich
-kaputte Nachricht, die restlichen 499 sind gespeichert. Steht als offener Punkt drin.
+**Ein Haken, der zum Bündeln gehört.** `@RetryableTopic` zählt pro Nachricht — aber schiefgehen
+kann nur das ganze Paket. Eine einzige kaputte Nachricht lässt alle 500 scheitern und schickt am
+Ende alle 500 auf das DLT. Antwort darauf: schlägt ein Paket fehl, schreibt der `batch-service`
+dieses eine Paket **einmalig Zeile für Zeile**. Dann scheitert nur die wirklich kaputte
+Nachricht, die restlichen 499 sind gespeichert. Steht als offener Punkt drin.
 
 ### 2.5 Login-Ablauf (Keycloak)
 
@@ -252,7 +272,6 @@ sequenceDiagram
   S-->>U: Nachrichten
 ```
 
-
 ### 2.6 Docker-Compose — Ports und Netzwerk
 
 ```yaml
@@ -262,7 +281,7 @@ services:
   chat-service:  { expose: ["8080"],   networks: [chat-net] }
   batch-service: {                     networks: [chat-net] }
   keycloak:      { expose: ["8080"],   networks: [chat-net] }
-  rabbitmq:      { expose: ["5672"],   networks: [chat-net] }
+  kafka:         { expose: ["9092"],   networks: [chat-net] }   # KRaft-Modus, kein ZooKeeper-Container
   postgres:      { expose: ["5432"],   networks: [chat-net] }
 networks:
   chat-net: { driver: bridge }
@@ -271,7 +290,7 @@ networks:
 Merksatz für die Prüfung: `expose` macht einen Port **nur im Docker-Netz** sichtbar,
 `ports` veröffentlicht ihn auf dem Host. Genau ein `ports`-Eintrag ist erlaubt.
 Die Services erreichen einander über ihren **Service-Namen** als Hostname (`chat-service`,
-`rabbitmq`, …) — das übernimmt Dockers interner DNS.
+`kafka`, …) — das übernimmt Dockers interner DNS.
 
 ## 3. Datenmodell (Entwurf)
 
@@ -308,7 +327,7 @@ jemand ist — nicht, **wo** er mitlesen darf.
 
 Zwei Details hängen direkt am Bündeln aus Abschnitt 2.3:
 
-- **Die UUID vergibt der `chat-service`**, bevor er publiziert. Nur so kann der Schreibvorgang
+- **Die UUID vergibt der `chat-service`**, bevor er sie publiziert. Nur so kann der Schreibvorgang
   gefahrlos wiederholt werden: `INSERT … ON CONFLICT (id) DO NOTHING` verwirft eine erneut
   zugestellte Nachricht. Eine von der Datenbank vergebene ID (`SERIAL`) würde bei jedem
   Wiederholungsversuch eine neue Zeile erzeugen — die Nachricht stünde doppelt im Chat.
@@ -328,47 +347,57 @@ Gespeichert wird nur der Benutzername als Absender.
 2. **SSE und der Authorization-Header.** Das native `EventSource` im Browser kann **keine**
    eigenen Header senden. Varianten: Token als Query-Parameter (unschön, landet im Log),
    ein kurzlebiges Ticket vor dem Verbindungsaufbau, oder `fetch`-basiertes SSE. Zu entscheiden.
-3. **Paketgrösse und Zeitlimit sind geraten.** 500 Nachrichten / 200 ms sind Startwerte, keine
-   gemessenen. Sie müssen unter Last nachgestellt werden — das ist eine schöne Messübung:
-   Queue-Länge und Schreibdauer gegeneinander auftragen.
-4. **Einzelweg nach einem fehlgeschlagenen Paket** (Abschnitt 2.4). Schlägt ein Paket fehl,
+3. **Paketgrösse und Wartezeit sind geraten.** `max.poll.records: 500`, `fetch.max.wait.ms: 200`
+   sind Startwerte, keine gemessenen — und wie in Abschnitt 2.3 erklärt ohnehin nur eine
+   Annäherung an «500 oder 200 ms». Müssen unter Last nachgestellt werden.
+4. **Kein automatisches Backpressure auf den Sender.** Anders als RabbitMQ blockiert Kafka
+   `chat-service` beim Senden nicht von sich aus, wenn `batch-service` dauerhaft nicht nachkommt
+   (Abschnitt 2.4). Um «sichtbar blockieren statt still verlieren» zu erreichen, müsste
+   `chat-service` den Consumer-Lag von `batch-service` selbst prüfen und ab einer Schwelle mit
+   `503` antworten. **Noch nicht gebaut.**
+5. **Einzelweg nach einem fehlgeschlagenen Paket** (Abschnitt 2.4). Schlägt ein Paket fehl,
    soll der `batch-service` es einmalig Zeile für Zeile schreiben, damit nur die tatsächlich
-   kaputte Nachricht in der DLQ landet. Noch nicht gebaut.
-5. **Existiert der eingeladene Benutzername überhaupt?** Beim Einladen prüfen wir vorerst
+   kaputte Nachricht auf dem Dead-Letter-Topic landet. Noch nicht gebaut.
+6. **Existiert der eingeladene Benutzername überhaupt?** Beim Einladen prüfen wir vorerst
    **nicht** gegen Keycloak. Ein Tippfehler legt dann eine Mitgliedschaft für jemanden an, den
    es nicht gibt — harmlos, aber unschön. Später über die Keycloak-Admin-API prüfbar.
-6. **RabbitMQ Management-UI im Unterricht.** Sie liegt auf Port 15672 und wäre laut Vorgabe
-   nicht erreichbar. Entweder über das Gateway unter `/rabbit` proxien oder für Demos
-   bewusst freigeben.
-7. **Zweite chat-service-Instanz** (gestrichelter Kasten in der Skizze) — geplant, aber noch
-   nicht entschieden, ob sie Teil der Abgabe ist. Jede Instanz braucht eine eigene,
-   exklusive Queue am Fanout-Exchange.
-8. **Nachrichtenverlust beim Reconnect.** Fällt die SSE-Verbindung kurz aus, fehlen Nachrichten.
-   Geplant: nach dem Reconnect den Verlauf per `GET /api/messages` nachladen.
-9. **JavaFX-Client und Docker.** Der Client läuft auf dem Host, nicht im Compose. Er nutzt
-   `localhost:8080` wie der Browser — die Port-Regel bleibt damit eingehalten.
-10. **Raum verlassen, Mitglied entfernen, Raum löschen** — geplant ist bisher nur anlegen und
-   einladen. Was mit den Nachrichten passiert, wenn ein Raum gelöscht wird, ist offen.
-11. **Rollen in Keycloak** (z. B. `user`, `moderator`) — noch nicht festgelegt. Eine Rolle
-   `moderator` wäre die naheliegende Stelle, um das Einladen einzuschränken.
+7. **Kafka-UI im Unterricht.** Eine Oberfläche wie Kafka UI zeigt Topics, Partitionen und
+   Consumer-Lag — praktisch für die Backpressure-Lehrstunde. Sie läge auf einem eigenen Port und
+   wäre laut Vorgabe nicht erreichbar. Entweder über das Gateway proxien oder für Demos bewusst
+   freigeben.
+8. **Zweite chat-service-Instanz** (gestrichelter Kasten in der Skizze) — geplant, aber noch
+   nicht entschieden, ob sie Teil der Abgabe ist. Mit Kafka braucht jede Instanz nur eine eigene,
+   eindeutige Consumer-Gruppen-ID für die Live-Anzeige — einfacher als eine eigene, exklusive
+   Queue am Fanout-Exchange, wie es bei RabbitMQ nötig gewesen wäre.
+9. **Nachrichtenverlust beim Reconnect.** Fällt die SSE-Verbindung kurz aus, fehlen Nachrichten
+   (die flüchtige Consumer-Gruppe der Instanz beginnt ohnehin immer bei «jetzt», holt also nichts
+   nach). Geplant: nach dem Reconnect den Verlauf per `GET /api/messages` nachladen.
+10. **JavaFX-Client und Docker.** Der Client läuft auf dem Host, nicht im Compose. Er nutzt
+    `localhost:8080` wie der Browser — die Port-Regel bleibt damit eingehalten.
+11. **Raum verlassen, Mitglied entfernen, Raum löschen** — geplant ist bisher nur anlegen und
+    einladen. Was mit den Nachrichten passiert, wenn ein Raum gelöscht wird, ist offen.
+12. **Rollen in Keycloak** (z. B. `user`, `moderator`) — noch nicht festgelegt. Eine Rolle
+    `moderator` wäre die naheliegende Stelle, um das Einladen einzuschränken.
 
 ## 5. Nächste Schritte
 
-1. `docker-compose.yml` mit Keycloak, RabbitMQ, PostgreSQL — hochfahren und prüfen, dass
-   von aussen nur Port 8080 antwortet.
+1. `docker-compose.yml` mit Keycloak, Kafka (KRaft-Modus), PostgreSQL — hochfahren und prüfen,
+   dass von aussen nur Port 8080 antwortet.
 2. Keycloak-Realm `chat` mit einem Testnutzer anlegen und exportieren, damit der Realm beim
    Start automatisch importiert wird.
-3. `chat-service`: `POST /api/messages` publiziert auf den Exchange, `GET /api/messages` liest
-   aus der Datenbank. Noch ohne Consumer — die Nachricht landet erst mal nirgends.
-4. `batch-service`: Consumer auf `chat.persist`, **zuerst einzeln schreiben**. Damit ist der Weg
-   Ende zu Ende sichtbar und die Nachricht steht in der Datenbank.
-5. Erst dann auf Bündeln umstellen (`setConsumerBatchEnabled`, `batchUpdate`) und den
+3. `chat-service`: `POST /api/messages` schreibt auf das Topic `chat.messages` (Schlüssel
+   `roomId`), `GET /api/messages` liest aus der Datenbank. Noch ohne Consumer — die Nachricht
+   landet erst mal nirgends, ausser im Topic-Log selbst.
+4. `batch-service`: Consumer-Gruppe `batch-service` auf `chat.messages`, **zuerst einzeln
+   schreiben**. Damit ist der Weg Ende zu Ende sichtbar und die Nachricht steht in der Datenbank.
+5. Erst dann auf Bündeln umstellen (`@KafkaListener(batch = "true")`, `batchUpdate`) und den
    Unterschied messen. Diese Reihenfolge ist Absicht: man sieht, was das Bündeln bringt.
 6. Raumverwaltung: Tabellen `room` und `room_member`, die drei Endpunkte, und die
    Mitgliedsprüfung beim Senden und Lesen.
-7. SSE-Endpunkt und React-Oberfläche.
-8. Queue-Regeln aus Abschnitt 2.4 setzen (Quorum-Queue, `x-delivery-limit`, DLQ; TTL und
-   Längenbegrenzung auf den Live-Queues) und den Rückstau in der Management-UI provozieren.
+7. SSE-Endpunkt und React-Oberfläche — jede `chat-service`-Instanz mit eigener, flüchtiger
+   Consumer-Gruppe (`auto.offset.reset: latest`).
+8. Kafka-Regeln aus Abschnitt 2.4 setzen (Retention auf `chat.messages`, `@RetryableTopic` mit
+   Dead-Letter-Topic) und den Rückstau über den Consumer-Lag von `batch-service` provozieren.
 9. Zeitgesteuerte Aufgaben im `batch-service` (Archivierung, Statistik).
 10. JavaFX-Client.
 
@@ -401,8 +430,9 @@ Gespeichert wird nur der Benutzername als Absender.
   denselben Port. Der Widerspruch, den ich als Ausschlussgrund gesehen hatte, war keiner.
 - **RabbitMQ wurde nicht einfach akzeptiert**, sondern begründet nachgefragt. Die Begründung
   (sichtbare Queues in der Management-UI, Lehrplan-Vokabular Exchange/Queue/ACK, wenig Code,
-  leichtgewichtig im Compose) hat gehalten. Gegenargument bleibt notiert: Kafka wäre
-  industriell relevanter für Datenströme.
+  leichtgewichtig im Compose) hat gehalten — bis zum späteren Wechsel auf Kafka, siehe Nachtrag
+  unten. Das Gegenargument von damals (Kafka wäre industriell relevanter für Datenströme) ist
+  genau der Grund, aus dem es später doch gewählt wurde.
 
 ### Verworfene Varianten
 
@@ -410,7 +440,7 @@ Gespeichert wird nur der Benutzername als Absender.
 |---|---|
 | Thymeleaf + SSE als Web-UI | Zieht UI und Backend zusammen, widerspricht dem Modulziel |
 | Vaadin Flow | Zu viel Framework-Magie, für Lernende nicht Zeile für Zeile erklärbar |
-| Apache Kafka | Offsets/Partitionen sind ein anderes Kapitel; schwergewichtiger im Compose |
+| RabbitMQ | Ursprünglich gewählt (sichtbare Queues, wenig Code) — später zugunsten von Kafka verworfen, siehe Nachtrag «Wechsel von RabbitMQ zu Kafka» |
 | ActiveMQ Artemis | Weniger verbreitet, keine gleichwertige sichtbare Oberfläche |
 | 2 Services (Web + Backend zusammen) | Zeigt zu wenig verteilte Kommunikation |
 | 4–5 Services (user-, notification-service) | Mehr Boilerplate pro Feature als Lernwert |
@@ -420,8 +450,8 @@ Gespeichert wird nur der Benutzername als Absender.
 
 ### Was ich ohne Rückfrage entschieden habe
 
-PostgreSQL als Datenbank, Spring Boot als Framework, Fanout-Exchange statt Direct-Exchange,
-und die Aufgaben des batch-service. Alles vier ist ohne Umbau der Architektur austauschbar —
+PostgreSQL als Datenbank, Spring Boot als Framework, ein Topic statt getrennter Themen pro
+Zweck, und die Aufgaben des batch-service. Alles ist ohne Umbau der Architektur austauschbar —
 darum keine Frage, sondern eine Festlegung, die man überstimmen kann.
 
 ### Nachtrag — Diagramme
@@ -449,16 +479,16 @@ verteilt nicht nur, er entkoppelt auch die Anzeige von der Datenbank.
 | Verworfen | Grund |
 |---|---|
 | `chat-service` schreibt einzeln, `batch-service` räumt nur auf | Genau der Fall, den die Vorgabe ausschliesst |
-| Sammelpuffer im `chat-service` selbst | Bei mehreren Instanzen schreiben mehrere Dienste gleichzeitig; ausserdem ist der Puffer bei einem Neustart weg, weil er nicht in der Queue steht |
+| Sammelpuffer im `chat-service` selbst | Bei mehreren Instanzen schreiben mehrere Dienste gleichzeitig; ausserdem ist der Puffer bei einem Neustart weg, weil er nicht dauerhaft gespeichert ist |
 | Nur nach Anzahl bündeln (ohne Zeitlimit) | Bei wenig Betrieb bleiben Nachrichten beliebig lange liegen |
 | Nur nach Zeit bündeln (ohne Obergrenze) | Bei einem Lastspitze wird ein einzelnes Paket beliebig gross |
 | ID und Zeitstempel von der Datenbank vergeben lassen | Macht das Wiederholen eines Pakets unmöglich und verfälscht die Sendezeit |
 
-**Was ich dabei ohne Rückfrage festgelegt habe:** die Werte 500 Nachrichten und 200 ms. Beide
+**Was ich dabei ohne Rückfrage festgelegt habe:** die Werte 500 Nachrichten und ~200 ms. Beide
 sind Startwerte und stehen als offener Punkt Nr. 3 zum Nachmessen drin.
 
 **Was ich einordnen muss, auch wenn es nicht gefragt war:** bei echten 100 000 Nachrichten pro
-Sekunde wäre der Engpass nicht mehr die Datenbank, sondern der Broker und das Verteilen an die
+Sekunde wäre der Engpass nicht mehr die Datenbank, sondern das Verteilen an die
 SSE-Verbindungen. Das Bündeln löst die Schreiblast — nicht die Skalierung insgesamt.
 
 ### Nachtrag — Rückstau, Räume und die Zahl der Schreiber
@@ -474,30 +504,31 @@ Drei offene Punkte wurden entschieden, zwei davon per Vorgabe, einer auf meinen 
   einfachste Form gemacht, die trägt: eingeladen heisst sofort Mitglied, kein Annehmen. Und
   zwei Tabellen statt einer, weil die Mitgliedschaft die Zugriffsprüfung ist.
 
-**Auf Nachfrage vorgeschlagen — was bei einem Überlauf von `chat.persist` passieren soll:**
-nichts wegwerfen, sondern blockieren. Die Begründung steht in Abschnitt 2.4; kurz: eine
-Nachricht in `chat.persist` **ist** der Verlauf, und ein Verlauf mit stillen Löchern ist
-schlimmer als ein Chat, der sichtbar streikt. Dazu eine Dead-Letter-Queue, aber ausdrücklich
-nur für Nachrichten, die sich **nie** schreiben lassen — nicht für zu viele auf einmal. Diese
-beiden Fälle werden regelmässig verwechselt.
+**Auf Nachfrage vorgeschlagen — was bei einem Rückstau vor dem Speichern passieren soll:**
+nichts wegwerfen, sondern blockieren. Die Begründung steht (damals wie heute) in Abschnitt 2.4;
+kurz: eine Nachricht, die noch nicht gespeichert ist, **ist** der zukünftige Verlauf, und ein
+Verlauf mit stillen Löchern ist schlimmer als ein Chat, der sichtbar streikt. Dazu eine
+Dead-Letter-Ablage, aber ausdrücklich nur für Nachrichten, die sich **nie** schreiben lassen —
+nicht für zu viele auf einmal. Diese beiden Fälle werden regelmässig verwechselt.
 
-Der Gewinn dabei war nicht die Entscheidung selbst, sondern der Vergleich: `chat.live` bekommt
-die **gegenteilige** Regel (wegwerfen und nach 30 Sekunden verfallen lassen), obwohl dieselbe
-Nachricht drinsteht. Das macht sichtbar, dass Überlaufverhalten am Zweck hängt, nicht an den
-Daten.
+Der Gewinn dabei war nicht die Entscheidung selbst, sondern der Vergleich: die Live-Anzeige
+bekommt die **gegenteilige** Regel (nichts nachliefern, immer bei «jetzt» beginnen), obwohl
+dieselbe Nachricht drinsteht. Das macht sichtbar, dass Überlaufverhalten am Zweck hängt, nicht
+an den Daten. (Mit RabbitMQ war das eine Frage der Queue-Konfiguration; mit Kafka ist es eine
+Frage der Consumer-Gruppen-Strategie — siehe Nachtrag «Wechsel von RabbitMQ zu Kafka».)
 
 **Verworfen:**
 
 | Verworfen | Grund |
 |---|---|
-| `x-max-length` mit «ältestes wegwerfen» auf `chat.persist` | Löscht still Nachrichten aus dem Verlauf; niemand merkt es |
-| Queue unbegrenzt laufen lassen und nur beobachten | Ohne Grenze fällt irgendwann der Broker aus — und mit ihm auch der Live-Chat |
+| Nachrichten vor dem Speichern grosszügig verwerfen, statt zu blockieren | Löscht still Nachrichten aus dem Verlauf; niemand merkt es |
+| Unbegrenzt laufen lassen und nur beobachten | Ohne Grenze fällt irgendwann der Broker aus — und mit ihm auch der Live-Chat |
 | Einladung mit Annehmen/Ablehnen | Zwei Zustände mehr, für die Aufgabenstellung kein Gewinn |
 | Mitgliedschaften als Keycloak-Gruppen | Bindet die Fachlogik an den Login-Dienst und braucht die Admin-API für jede Einladung |
 | Raum als reines Textfeld an der Nachricht (erste Fassung) | Kein Ort für Mitglieder, keine Zugriffsprüfung möglich |
 
-**Was ich dabei ohne Rückfrage festgelegt habe:** `x-delivery-limit: 3`, `x-max-length: 1000`
-und 30 Sekunden TTL auf den Live-Queues. Startwerte wie 500/200 ms — gehören nachgemessen.
+**Was ich dabei ohne Rückfrage festgelegt habe:** die konkreten Zahlen (damals RabbitMQ-Werte,
+heute `max.poll.records`/`fetch.max.wait.ms`) — Startwerte wie 500/200 ms, gehören nachgemessen.
 
 ### Nachtrag — Sprache im Code
 
@@ -514,3 +545,59 @@ Java, Spring und SQL bringen ihr eigenes englisches Vokabular mit (`get`, `find`
 Bezeichner folgen also der Sprache der Werkzeuge, die Erklärung folgt der Sprache des Unterrichts.
 Das Datenmodell oben ist entsprechend umbenannt (`room`, `room_member`, `sender`, `sent_at`), die
 Raum-Endpunkte heissen `/api/rooms`.
+
+### Nachtrag — Wechsel von RabbitMQ zu Kafka
+
+Der Broker wurde von RabbitMQ auf **Apache Kafka** umgestellt. Anders als bei den bisherigen
+Nachträgen kam der Anstoss diesmal **nicht** aus einer neuen Vorgabe, sondern aus eigenem
+Wunsch: Kafka ist industriell der verbreitetere Standard für Event-Streaming, und genau dieses
+Argument stand schon in der ursprünglichen Entscheidung als Gegenposition (Abschnitt "Wo
+umentschieden wurde").
+
+**Warum das mehr war als Namen ersetzen.** RabbitMQ und Kafka bilden dieselbe Rolle im System —
+ein Broker zwischen `chat-service` und `batch-service` — mit **unterschiedlichen Bausteinen**
+ab. Exchange/Queue/ACK lassen sich nicht 1:1 auf Topic/Partition/Offset übertragen, deshalb wurde
+Abschnitt 2 neu durchdacht, nicht nur umbenannt:
+
+| RabbitMQ-Konzept | Kafka-Entsprechung | Was sich dadurch ändert |
+|---|---|---|
+| Ein Fanout-Exchange verteilt an alle gebundenen Queues | Ein Topic verteilt automatisch eine volle Kopie an jede **eigene Consumer-Gruppe** | Aus zwei Queue-Typen (`chat.live.*`, `chat.persist`) wird **ein** Topic mit zwei Consumer-Gruppen-Strategien — eine Vereinfachung |
+| `chat.live.<instanz>` mit `x-max-length`/TTL, damit Alt-Nachrichten verworfen werden | Flüchtige Consumer-Gruppe je Instanz, `auto.offset.reset: latest`, nie committete Offsets | Statt Nachrichten aktiv zu verwerfen, werden sie strukturell nie zweimal gelesen — kein Wegwerf-Mechanismus mehr nötig |
+| `chat.persist` als dauerhafte Queue, ACK erst nach Commit | Dauerhafte Consumer-Gruppe `batch-service`, Offset-Commit erst nach Commit | Gleiches Prinzip, andere Mechanik |
+| RabbitMQ bremst überlastete Producer automatisch (Flow Control) | **Kein eingebautes Gegenstück.** Kafka ist ein retention-basierter Log, kein grössenbegrenzter Speicher, der den Sender bremst | Echter Funktionsverlust — siehe unten |
+| Quorum-Queue mit `x-delivery-limit`, Dead-Letter-Queue | `@RetryableTopic` (nicht-blockierende Wiederholung) mit Dead-Letter-**Topic** | Vergleichbares Ergebnis, anderer Baustein |
+| Reihenfolge nur über den vom Sender gesetzten Zeitstempel | Zusätzlich: Kafka garantiert Reihenfolge **innerhalb einer Partition** — `roomId` als Schlüssel sichert Reihenfolge pro Raum strukturell | Eine echte Verbesserung gegenüber der RabbitMQ-Fassung |
+
+**Was ehrlich schlechter geworden ist, nicht nur anders.** Der wichtigste Punkt: RabbitMQs
+automatische Flow Control — «Sender wird gebremst, `POST /api/messages` antwortet mit 503, statt
+dass irgendwo still Nachrichten verloren gehen» — hat **kein eingebautes Kafka-Gegenstück**. Ein
+Topic wächst gemäss Retention weiter, unabhängig davon, ob `batch-service` mitkommt. Das ist als
+neuer offener Punkt Nr. 4 aufgenommen, nicht stillschweigend übergangen: um dieselbe Garantie zu
+bekommen, muss `chat-service` künftig selbst den Consumer-Lag von `batch-service` prüfen und ab
+einer Schwelle ablehnen. Bis das gebaut ist, schützt nur eine grosszügige Retention-Zeit vor
+Datenverlust — und auch die nur vorübergehend.
+
+Zweiter Preis: die «500 oder 200 ms»-Regel liess sich bei RabbitMQ als **eine** Einstellung
+ausdrücken (`setConsumerBatchEnabled` + `setBatchSize` + `setReceiveTimeout`). Bei Kafka ist das
+eine **Annäherung** über zwei getrennte Broker-Einstellungen (`fetch.min.bytes`,
+`fetch.max.wait.ms`) plus eine Client-seitige Obergrenze (`max.poll.records`) — weniger exakt,
+aber näher an dem, was in echten Kafka-Systemen tatsächlich gemacht wird.
+
+**Was gleich geblieben ist.** UUID und Zeitstempel weiterhin vom `chat-service` gesetzt,
+`ON CONFLICT (id) DO NOTHING` zur Deduplizierung, `JdbcTemplate.batchUpdate` zum Schreiben, genau
+eine `batch-service`-Instanz, das gesamte Datenmodell (Abschnitt 3), die Raumverwaltung, der
+Login-Ablauf über Keycloak (Abschnitt 2.5) und die Docker-Netzwerk-Regeln. Der Wechsel betrifft
+ausschliesslich den Broker und alles, was direkt an seinen Bausteinen hängt.
+
+**Verworfen bei diesem Wechsel:**
+
+| Verworfen | Grund |
+|---|---|
+| Zwei separate Topics (`chat.live`, `chat.persist`) analog zu den RabbitMQ-Queues | Unnötig — Kafkas Fanout-pro-Consumer-Gruppe leistet das bereits mit einem einzigen Topic |
+| So tun, als hätte Kafka dieselbe automatische Backpressure wie RabbitMQ | Wäre unehrlich — der Unterschied ist real und steht jetzt als offener Punkt Nr. 4 |
+| ZooKeeper mit einplanen | Modernes Kafka läuft im KRaft-Modus ohne ZooKeeper — ein Container weniger im Compose |
+
+**Was ich ohne Rückfrage festgelegt habe:** die Aufteilung in eine flüchtige Gruppe pro Instanz
+(Live-Anzeige) und eine dauerhafte Gruppe (`batch-service`), `roomId` als Partitionsschlüssel,
+und den Umgang mit Giftnachrichten über `@RetryableTopic`. Alle drei sind ohne Umbau der
+Architektur änderbar.

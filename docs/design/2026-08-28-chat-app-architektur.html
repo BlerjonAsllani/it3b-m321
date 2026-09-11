@@ -213,16 +213,16 @@ flowchart TB
     chat["chat-service<br/><small>REST · SSE · JWT-Prüfung</small>"]
     batch["batch-service<br/><small>einziger Schreiber</small>"]
     kc["keycloak<br/><small>Login / OIDC</small>"]
-    mq["rabbitmq<br/><small>Fanout-Exchange</small>"]
+    mq["kafka<br/><small>Topic chat.messages</small>"]
     db[("postgres<br/><small>Nachrichten</small>")]
 
     gw -->|"/api · /stream"| chat
     gw -->|"/auth"| kc
     chat -->|"Token prüfen (JWKS)"| kc
-    chat -->|"publish"| mq
+    chat -->|"produce<br/>key = roomId"| mq
     chat -.->|"Verlauf LESEN"| db
-    mq -.->|"Queue chat.live<br/>→ SSE"| chat
-    mq -->|"Queue chat.persist"| batch
+    mq -.->|"eigene Gruppe je Instanz<br/>→ SSE"| chat
+    mq -->|"Gruppe batch-service"| batch
     batch ==>|"Batch-INSERT<br/>500 Zeilen"| db
   end
 
@@ -248,7 +248,7 @@ flowchart TB
           <tr><td class="mono">chat-service</td><td><code>expose: 8080</code></td><td>nur <code>chat-net</code></td></tr>
           <tr><td class="mono">batch-service</td><td>—</td><td>nur <code>chat-net</code></td></tr>
           <tr><td class="mono">keycloak</td><td><code>expose: 8080</code></td><td>nur <code>chat-net</code></td></tr>
-          <tr><td class="mono">rabbitmq</td><td><code>expose: 5672</code></td><td>nur <code>chat-net</code></td></tr>
+          <tr><td class="mono">kafka</td><td><code>expose: 9092</code></td><td>nur <code>chat-net</code></td></tr>
           <tr><td class="mono">postgres</td><td><code>expose: 5432</code></td><td>nur <code>chat-net</code></td></tr>
         </tbody>
       </table>
@@ -275,7 +275,7 @@ sequenceDiagram
   participant C as Client A
   participant G as gateway
   participant A as chat-service<br/>Instanz A
-  participant MQ as rabbitmq
+  participant K as kafka
   participant B as chat-service<br/>Instanz B
   participant C2 as Client B
   participant BS as batch-service
@@ -284,27 +284,29 @@ sequenceDiagram
   C->>G: POST /api/messages + Bearer-Token
   G->>A: weiterleiten
   A->>A: Token prüfen, UUID + Zeitstempel
-  A->>MQ: publish auf Exchange chat.messages
+  A->>K: send(chat.messages, key=roomId)
   A-->>C: 202 Accepted
-  Note over MQ: Fanout:<br/>je Queue eine Kopie
-  MQ-->>A: chat.live.A
-  MQ-->>B: chat.live.B
-  MQ-->>BS: chat.persist
+  Note over K: jede Consumer-Gruppe<br/>bekommt eine eigene Kopie
+  K-->>A: Gruppe chat-live-A
+  K-->>B: Gruppe chat-live-B
+  K-->>BS: Gruppe batch-service
   A-->>C: SSE
   B-->>C2: SSE
-  Note over BS: sammeln:<br/>500 oder 200 ms
+  Note over BS: sammeln:<br/>bis 500 oder ~200 ms
   BS->>DB: EIN Batch-INSERT, 500 Zeilen
-  BS->>MQ: ACK für alle 500
+  BS->>K: Offsets committen für alle 500
 </pre>
       </div>
       <p class="figcap">Abb. 2 — Senden einer Nachricht. Anzeige und Speichern laufen getrennt.</p>
 
       <div class="callout">
         <p class="lb">Der Kernpunkt</p>
-        <p>Am selben Exchange hängen zwei Arten von Queues mit völlig verschiedenem Zweck:
-        <code>chat.live.&lt;instanz&gt;</code> ist flüchtig und dient der Anzeige,
-        <code>chat.persist</code> ist dauerhaft und dient dem Speichern. Der
-        <code>chat-service</code> berührt die Datenbank beim Senden gar nicht mehr.</p>
+        <p>Am selben Topic hängen zwei Arten von Consumer-Gruppen mit völlig verschiedenem Zweck:
+        <code>chat-live-&lt;instanz&gt;</code> ist flüchtig, beginnt immer bei «jetzt» und dient
+        der Anzeige; <code>batch-service</code> ist dauerhaft, committet Offsets und dient dem
+        Speichern. Kafka liefert jeder eigenen Gruppe eine vollständige Kopie — das ersetzt den
+        Fanout-Exchange. Der <code>chat-service</code> berührt die Datenbank beim Senden gar
+        nicht mehr.</p>
       </div>
     </section>
 
@@ -322,14 +324,14 @@ sequenceDiagram
       Senden mit.</p>
 
       <h3>Die Lösung</h3>
-      <p class="measure">Der <code>batch-service</code> sammelt, was aus <code>chat.persist</code>
-      hereinkommt, und schreibt in Paketen.</p>
+      <p class="measure">Der <code>batch-service</code> sammelt, was seine Consumer-Gruppe vom
+      Topic <code>chat.messages</code> abholt, und schreibt in Paketen.</p>
       <div class="tablewrap">
       <table>
         <thead><tr><th>Regel</th><th>Wert</th><th>Warum</th></tr></thead>
         <tbody>
-          <tr><td>Paketgrösse</td><td class="mono">500 Nachrichten</td><td>Ein <code>INSERT</code> mit 500 Zeilen statt 500 Anweisungen</td></tr>
-          <tr><td>Zeitlimit</td><td class="mono">200 ms</td><td>Damit auch bei wenig Betrieb nichts liegen bleibt</td></tr>
+          <tr><td>Paketgrösse (Obergrenze)</td><td class="mono">500 Nachrichten</td><td>Ein <code>INSERT</code> mit 500 Zeilen statt 500 Anweisungen</td></tr>
+          <tr><td>Wartezeit</td><td class="mono">~200 ms</td><td>Damit auch bei wenig Betrieb nichts liegen bleibt</td></tr>
           <tr><td>Ausgelöst durch</td><td class="mono">was zuerst eintritt</td><td>Voll oder Zeit abgelaufen — dann wird geschrieben</td></tr>
         </tbody>
       </table>
@@ -343,14 +345,19 @@ sequenceDiagram
 
       <h3>Wie das konkret gebaut wird</h3>
       <ol class="steps">
-        <li>Spring AMQP bündelt Consumer-seitig: <code>setConsumerBatchEnabled(true)</code>,
-        <code>setBatchSize(500)</code>, <code>setReceiveTimeout(200)</code>. Die Listener-Methode
-        bekommt eine <code>List&lt;Message&gt;</code> — genau die Semantik «500 Stück oder 200 ms».</li>
+        <li>Spring Kafka bündelt Consumer-seitig: <code>@KafkaListener(…, batch = "true")</code>.
+        Die Listener-Methode bekommt eine <code>List&lt;Message&gt;</code> statt einer einzelnen
+        Nachricht.</li>
+        <li><b>Ehrlich benannt:</b> Kafka kennt keine Einstellung «500 Stück oder 200 ms».
+        <code>max.poll.records: 500</code> ist nur eine <b>Obergrenze</b>, keine Mindestmenge; wie
+        lange der Broker auf genug Daten wartet, regeln <code>fetch.min.bytes</code> und
+        <code>fetch.max.wait.ms: 200</code>. Das ist eine Annäherung über zwei Einstellungen,
+        keine einzelne Garantie.</li>
         <li>Geschrieben wird mit <code>JdbcTemplate.batchUpdate(…)</code>. In der JDBC-URL muss
         <code>reWriteBatchedInserts=true</code> stehen, sonst schickt der PostgreSQL-Treiber die
         Zeilen trotzdem einzeln über die Leitung.</li>
-        <li><b>Prefetch ≥ Paketgrösse.</b> Steht <code>prefetch</code> auf 250, kann der Consumer
-        nie 500 Nachrichten sammeln und läuft dauernd ins Zeitlimit.</li>
+        <li><b>Offsets erst nach dem Commit.</b> <code>ack-mode: MANUAL</code> — die Gruppe
+        committet ihre Offsets erst, nachdem <code>batchUpdate</code> erfolgreich war.</li>
       </ol>
 
       <h3>Was schiefgehen kann</h3>
@@ -358,10 +365,10 @@ sequenceDiagram
       <table>
         <thead><tr><th>Risiko</th><th>Antwort</th></tr></thead>
         <tbody>
-          <tr><td>Absturz mitten im Paket → Nachrichten weg</td><td><b>ACK erst nach dem Commit.</b> Ohne ACK stellt RabbitMQ das ganze Paket erneut zu.</td></tr>
+          <tr><td>Absturz mitten im Paket → Nachrichten weg</td><td><b>Offset-Commit erst nach dem DB-Commit.</b> Ohne Commit liest die Gruppe beim nächsten Poll ab derselben Stelle erneut.</td></tr>
           <tr><td>Erneute Zustellung → Nachricht doppelt</td><td>Die UUID kommt vom <code>chat-service</code> und ist Primärschlüssel. <code>ON CONFLICT (id) DO NOTHING</code> verwirft die Dublette.</td></tr>
-          <tr><td>Reihenfolge</td><td>Zeitstempel wird im <code>chat-service</code> gesetzt, nicht per <code>DEFAULT now()</code> — sonst hätten 500 Nachrichten dieselbe Zeit.</td></tr>
-          <tr><td>Datenbank kommt nicht nach</td><td><code>chat.persist</code> wächst — <b>sichtbar</b> in der Management-UI. Genau das ist die Lehrstunde zu Backpressure.</td></tr>
+          <tr><td>Reihenfolge</td><td>Zwei Gründe: Zeitstempel wird im <code>chat-service</code> gesetzt, nicht per <code>DEFAULT now()</code> — und Kafka garantiert Reihenfolge <b>innerhalb einer Partition</b>. Mit <code>roomId</code> als Schlüssel ist die Reihenfolge pro Raum gesichert.</td></tr>
+          <tr><td>Datenbank kommt nicht nach</td><td>Der <b>Consumer-Lag</b> der Gruppe <code>batch-service</code> wächst — sichtbar über <code>kafka-consumer-groups.sh --describe</code> oder eine Kafka-UI. Genau das ist die Lehrstunde zu Backpressure.</td></tr>
         </tbody>
       </table>
       </div>
@@ -385,67 +392,76 @@ sequenceDiagram
       <p class="kicker"><span class="n">04</span> Rückstau</p>
       <h2>Wenn der Schreiber nicht nachkommt</h2>
       <p class="lead measure">Der <code>batch-service</code> läuft <b>einmal</b>. Eine Instanz ist
-      damit die Obergrenze für den Durchsatz. Wird mehr gesendet als geschrieben, wächst die
-      Queue <code>chat.persist</code> — das ist kein Fehler, das ist die Aufgabe einer Queue.
-      Drei Fälle muss man aber auseinanderhalten.</p>
+      damit die Obergrenze für den Durchsatz. Wird mehr gesendet als geschrieben, wächst der
+      <b>Consumer-Lag</b> seiner Gruppe — das ist kein Fehler, dafür ist ein Log da. Drei Fälle
+      muss man aber auseinanderhalten, und hier unterscheidet sich Kafka am deutlichsten von
+      RabbitMQ.</p>
 
       <div class="tablewrap">
       <table>
         <thead><tr><th>Fall</th><th>Was passiert</th><th>Was wir tun</th></tr></thead>
         <tbody>
           <tr><td><b>Kurzer Rückstau</b><br><span class="mono">eine Lastspitze</span></td>
-              <td>Queue wächst und leert sich wieder</td>
-              <td>Nichts. Genau dafür ist die Queue da.</td></tr>
+              <td>Lag wächst und baut sich wieder ab</td>
+              <td>Nichts. Genau dafür ist der Puffer da.</td></tr>
           <tr><td><b>Dauerhafter Rückstau</b><br><span class="mono">Datenbank langsam oder weg</span></td>
-              <td>Queue wächst, bis der Speicher des Brokers voll ist</td>
-              <td>RabbitMQ bremst von sich aus die Absender aus (<i>Flow Control</i>): der
-              <code>publish</code> blockiert, <code>POST /api/messages</code> antwortet nach einem
-              Zeitlimit mit <code>503</code>. Der Chat nimmt <b>sichtbar</b> nichts mehr an.</td></tr>
+              <td>Lag wächst unbegrenzt weiter</td>
+              <td><b>Kafka bremst den Sender nicht von sich aus.</b> Ein Topic ist ein
+              retention-basierter Log, kein grössenbegrenzter Speicher. Ohne eigenes Zutun laufen
+              alte, noch nicht gespeicherte Nachrichten irgendwann aus der Retention und sind
+              <b>verloren</b>.</td></tr>
           <tr><td><b>Giftnachricht</b><br><span class="mono">lässt sich nie schreiben</span></td>
-              <td>Kein ACK, endlose erneute Zustellung, die Queue kommt nie leer</td>
-              <td>Quorum-Queue mit <code>x-delivery-limit: 3</code>. Nach drei Versuchen wandert
-              die Nachricht in die Dead-Letter-Queue <code>chat.persist.dlq</code>.</td></tr>
+              <td>Ohne Offset-Commit wird dieselbe Nachricht endlos erneut gelesen</td>
+              <td><code>@RetryableTopic</code> mit drei Versuchen und
+              <code>DeadLetterPublishingRecoverer</code>. Danach landet die Nachricht auf dem
+              Dead-Letter-Topic <code>chat.messages-dlt</code>.</td></tr>
         </tbody>
       </table>
       </div>
 
       <div class="callout warn">
-        <p class="lb">Bewusst nicht gewählt</p>
-        <p><code>x-max-length</code> mit «ältestes wegwerfen» auf <code>chat.persist</code>. Das
-        begrenzt zwar den Speicher, löscht dafür still Nachrichten aus dem Verlauf — und niemand
-        merkt es. Ein Chat, der sichtbar keine neuen Nachrichten mehr annimmt, ist besser als
-        einer, dessen Verlauf lautlos Löcher bekommt.</p>
+        <p class="lb">Der ehrliche Unterschied zu RabbitMQ</p>
+        <p>RabbitMQ bremst überlastete Producer automatisch (<i>Flow Control</i>) — Kafka hat dafür
+        <b>kein eingebautes Gegenstück</b>. Um dieselbe Garantie zu bekommen («lieber sichtbar
+        blockieren als still verlieren»), müsste <code>chat-service</code> den Consumer-Lag von
+        <code>batch-service</code> selbst prüfen (<code>AdminClient</code>) und
+        <code>POST /api/messages</code> ab einer Schwelle mit <code>503</code> ablehnen. Das ist
+        <b>noch nicht gebaut</b> — bis dahin verschafft nur eine grosszügige Retention Zeit.</p>
       </div>
 
-      <h3>Dieselbe Nachricht, zwei Queues, gegensätzliche Regeln</h3>
+      <h3>Dieselbe Nachricht, zwei Consumer-Strategien, gegensätzliche Regeln</h3>
       <div class="tablewrap">
       <table>
-        <thead><tr><th>Queue</th><th>Wofür</th><th>Bei Überlauf</th></tr></thead>
+        <thead><tr><th>Consumer-Gruppe</th><th>Wofür</th><th>Verhalten</th></tr></thead>
         <tbody>
-          <tr><td><span class="mono">chat.persist</span></td>
+          <tr><td><span class="mono">batch-service</span></td>
               <td>den Verlauf <b>speichern</b></td>
-              <td><b>Nichts wegwerfen.</b> Lieber blockieren. Dauerhaft, Quorum-Queue, DLQ für
+              <td><b>Nichts überspringen.</b> Dauerhaft, committete Offsets, macht nach einem
+              Neustart genau dort weiter, wo sie aufgehört hat. Dead-Letter-Topic nur für
               Giftnachrichten.</td></tr>
-          <tr><td><span class="mono">chat.live.&lt;instanz&gt;</span></td>
+          <tr><td><span class="mono">chat-live-&lt;instanz&gt;</span></td>
               <td>jetzt <b>anzeigen</b></td>
-              <td><b>Wegwerfen ist richtig.</b> <code>x-max-length: 1000</code> und
-              <code>x-message-ttl: 30000</code>. Eine 30 Sekunden alte «Live»-Nachricht ist
-              wertlos — wer sie verpasst hat, holt sie mit <code>GET /api/messages</code> nach.</td></tr>
+              <td><b>Nichts nachliefern ist richtig.</b> Flüchtig,
+              <code>auto.offset.reset: latest</code>, keine committeten Offsets — startet immer
+              wieder bei «jetzt». Wer etwas verpasst hat, holt es mit
+              <code>GET /api/messages</code> nach.</td></tr>
         </tbody>
       </table>
       </div>
 
       <div class="callout">
         <p class="lb">Der Punkt, um den es hier geht</p>
-        <p>Wie man mit Überlauf umgeht, hängt nicht an der Nachricht, sondern daran, <b>wozu</b>
-        man sie gerade braucht. Dieselben Bytes, zwei Queues, entgegengesetzte Regeln.</p>
+        <p>Wie man mit Rückstau umgeht, hängt nicht an der Nachricht, sondern daran, <b>wozu</b>
+        man sie gerade braucht. Dieselben Bytes, zwei Consumer-Gruppen, entgegengesetzte Regeln.
+        Bei RabbitMQ war das eine Frage der Queue-Konfiguration, bei Kafka eine Frage der
+        Consumer-Gruppen-Strategie.</p>
       </div>
 
       <div class="callout warn">
         <p class="lb">Ein Haken, der zum Bündeln gehört</p>
-        <p><code>x-delivery-limit</code> zählt pro Nachricht — schiefgehen kann aber nur das ganze
-        Paket. Eine einzige kaputte Nachricht lässt alle 500 scheitern und schickt am Ende alle 500
-        in die DLQ. Antwort: schlägt ein Paket fehl, schreibt der <code>batch-service</code> dieses
+        <p>Die Wiederholung zählt pro Nachricht — schiefgehen kann aber nur das ganze Paket. Eine
+        einzige kaputte Nachricht lässt alle 500 scheitern und schickt am Ende alle 500 auf das
+        DLT. Antwort: schlägt ein Paket fehl, schreibt der <code>batch-service</code> dieses
         eine Paket <b>einmalig Zeile für Zeile</b>. Dann scheitert nur die wirklich kaputte
         Nachricht, die restlichen 499 sind gespeichert.</p>
       </div>
@@ -502,13 +518,15 @@ sequenceDiagram
       <div class="decision">
         <div class="q"><span class="id">2</span><h4>Message Broker</h4></div>
         <div class="opts">
-          <span class="opt pick">RabbitMQ</span>
-          <span class="opt">Apache Kafka</span>
+          <span class="opt pick">Apache Kafka</span>
+          <span class="opt">RabbitMQ</span>
           <span class="opt">ActiveMQ Artemis</span>
         </div>
-        <p class="note">Die Management-UI macht Queues sichtbar, das Vokabular (Exchange, Queue,
-        ACK) ist genau der Lehrplan, und Senden ist eine Zeile Code. Kafka wäre industriell
-        relevanter für Datenströme, bringt aber Offsets und Partitionen als eigenes Kapitel mit.</p>
+        <p class="note"><b>Umentschieden.</b> Zuerst war RabbitMQ gewählt (sichtbare Queues,
+        wenig Code). Gewechselt wurde auf Kafka wegen der industriellen Relevanz für
+        Datenströme — Topics, Partitionen, Offsets und Consumer-Gruppen sind das Vokabular, das
+        in der Praxis zählt. Der Preis: kein automatisches Backpressure auf den Sender (siehe
+        Abschnitt 04) und eine Batch-Regel, die nur angenähert werden kann.</p>
       </div>
 
       <div class="decision">
@@ -531,7 +549,7 @@ sequenceDiagram
         </div>
         <p class="note">Einzeln schreiben ist genau der Fall, den die Vorgabe ausschliesst. Ein
         Puffer im <code>chat-service</code> wäre bei mehreren Instanzen mehrfach vorhanden und
-        bei einem Neustart verloren — in der Queue ist er dauerhaft.</p>
+        bei einem Neustart verloren — im Topic-Log ist er dauerhaft.</p>
       </div>
 
       <div class="decision">
@@ -546,15 +564,16 @@ sequenceDiagram
       </div>
 
       <div class="decision">
-        <div class="q"><span class="id">6</span><h4>Überlauf von <code>chat.persist</code></h4></div>
+        <div class="q"><span class="id">6</span><h4>Rückstau vor dem Speichern</h4></div>
         <div class="opts">
-          <span class="opt pick">blockieren, nichts wegwerfen · DLQ nur für Giftnachrichten</span>
-          <span class="opt">x-max-length, ältestes wegwerfen</span>
-          <span class="opt">unbegrenzt laufen lassen</span>
+          <span class="opt pick">nichts überspringen · DLT nur für Giftnachrichten</span>
+          <span class="opt">alte Nachrichten verwerfen</span>
+          <span class="opt">gar nicht beobachten</span>
         </div>
-        <p class="note">Eine Nachricht in <code>chat.persist</code> <b>ist</b> der Verlauf. Ein
-        Verlauf mit stillen Löchern ist schlimmer als ein Chat, der sichtbar streikt. Unbegrenzt
-        laufen lassen fällt weg, weil mit dem Broker auch der Live-Chat ausfällt.</p>
+        <p class="note">Eine noch nicht gespeicherte Nachricht <b>ist</b> der zukünftige Verlauf.
+        Ein Verlauf mit stillen Löchern ist schlimmer als ein Chat, der sichtbar streikt. Bei
+        Kafka ist das allerdings <b>nicht</b> automatisch zu haben — der Lag-Wächter im
+        <code>chat-service</code> ist noch ein offener Punkt.</p>
       </div>
 
       <div class="decision">
@@ -590,10 +609,11 @@ sequenceDiagram
       </div>
 
       <ul class="tick muted">
+        <li><b>Kein automatisches Backpressure</b> — Lag-Wächter im <code>chat-service</code> noch nicht gebaut</li>
         <li>500 / 200 ms sind <b>geraten</b>, nicht gemessen — unter Last nachstellen</li>
         <li>Einzelweg nach einem fehlgeschlagenen Paket — noch nicht gebaut</li>
         <li>Eingeladener Benutzername wird vorerst <b>nicht</b> gegen Keycloak geprüft</li>
-        <li>RabbitMQ Management-UI im Unterricht — proxien oder bewusst freigeben</li>
+        <li>Kafka-UI im Unterricht — proxien oder bewusst freigeben</li>
         <li>Zweite <code>chat-service</code>-Instanz — Teil der Abgabe oder nicht</li>
         <li>Nachrichtenverlust beim SSE-Reconnect — Verlauf nachladen</li>
         <li>Raum verlassen, Mitglied entfernen, Raum löschen — noch offen</li>

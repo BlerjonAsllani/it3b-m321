@@ -3,16 +3,16 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Ziel:** Ein lauffähiger `chat-service`, der über Swagger dokumentiert ist, den Nachrichtenverlauf
-aus PostgreSQL liest und neue Nachrichten auf den RabbitMQ-Fanout-Exchange publiziert.
+aus PostgreSQL liest und neue Nachrichten auf das Kafka-Topic `chat.messages` schreibt.
 
 **Architektur:** Ein einzelner Spring-Boot-Dienst mit drei Schichten — Controller (HTTP und
 Swagger-Doku), Service (Fachlogik) und Repository (SQL). Geschrieben wird in die
 Nachrichtentabelle **nicht**: der `chat-service` publiziert nur, das Speichern übernimmt später der
-`batch-service` (siehe `PLANUNG.md`, Abschnitt 2.3). PostgreSQL und RabbitMQ laufen in
+`batch-service` (siehe `PLANUNG.md`, Abschnitt 2.3). PostgreSQL und Kafka laufen in
 `docker-compose`, der Dienst selbst zunächst aus der IDE heraus.
 
 **Tech-Stack:** Java 21 · Spring Boot 3.5.16 · springdoc-openapi 2.9.0 (Swagger UI) ·
-Spring JDBC (`JdbcTemplate`) · Spring AMQP · PostgreSQL 17 · RabbitMQ 4 · Maven
+Spring JDBC (`JdbcTemplate`) · Spring Kafka · PostgreSQL 17 · Apache Kafka 4 (KRaft) · Maven
 
 **Spec:** `PLANUNG.md` (Abschnitte 1, 2.1, 2.2, 2.3, 3) und `docs/design/2026-08-28-chat-app-architektur.html`
 
@@ -47,7 +47,8 @@ Bewusst ausgelagert, damit der Bootstrap klein und prüfbar bleibt:
 - **Keycloak und Token-Prüfung.** Der Absender kommt vorerst aus dem Request-Body. Sobald das
   Token da ist, wird das Feld ersatzlos gestrichen. Bis dahin steht in der Swagger-Doku
   ausdrücklich «Platzhalter bis Keycloak».
-- **SSE (`GET /stream`).** Braucht einen `@RabbitListener` und eine eigene Live-Queue — eigener Plan.
+- **SSE (`GET /stream`).** Braucht einen `@KafkaListener` und eine eigene, flüchtige
+  Consumer-Gruppe je Instanz — eigener Plan.
 - **Raumverwaltung** (`POST /api/rooms`, Einladen, Mitgliedsprüfung). Die Tabellen werden hier schon
   angelegt, die Endpunkte kommen später.
 - **`batch-service`, Gateway, React-App, JavaFX-Client.**
@@ -59,7 +60,7 @@ Bewusst ausgelagert, damit der Bootstrap klein und prüfbar bleibt:
 ```
 it3b-m321/
 ├── .gitignore                                  neu
-├── docker-compose.yml                          neu — PostgreSQL + RabbitMQ
+├── docker-compose.yml                          neu — PostgreSQL + Kafka
 ├── db/
 │   ├── 01-schema.sql                           neu — room, room_member, message
 │   └── 02-demo-data.sql                        neu — ein Raum + drei Nachrichten zum Ausprobieren
@@ -70,8 +71,8 @@ it3b-m321/
         │   ├── java/ch/benedict/m321/chat/
         │   │   ├── ChatServiceApplication.java          Startpunkt
         │   │   ├── OpenApiConfiguration.java            Titel/Beschreibung der Swagger-Doku
-        │   │   ├── rabbit/
-        │   │   │   └── RabbitConfiguration.java         Exchange-Name, Exchange-Bean, JSON-Wandler
+        │   │   ├── kafka/
+        │   │   │   └── KafkaConfiguration.java          Topic-Name und Topic-Bean
         │   │   └── message/
         │   │       ├── Message.java                     Datensatz einer gespeicherten Nachricht
         │   │       ├── NewMessage.java                  Datensatz für den Request-Body
@@ -85,7 +86,7 @@ it3b-m321/
             └── message/MessageControllerTest.java       Endpunkte, ohne DB und ohne Broker
 ```
 
-**Warum diese Aufteilung:** ein Paket pro Fachthema (`message`, `rabbit`), nicht pro technischer
+**Warum diese Aufteilung:** ein Paket pro Fachthema (`message`, `kafka`), nicht pro technischer
 Schicht. Was zusammen geändert wird, liegt zusammen. Jede Datei hat genau eine Aufgabe, und keine
 ist länger als etwa 80 Zeilen — so kann sie im Unterricht am Stück gelesen werden.
 
@@ -355,7 +356,7 @@ public class OpenApiConfiguration {
         info.setVersion("0.1.0");
         info.setDescription(
                 "REST-Schnittstelle des chat-service (Modul M321). "
-                + "Neue Nachrichten werden entgegengenommen und an RabbitMQ weitergegeben. "
+                + "Neue Nachrichten werden entgegengenommen und an Kafka weitergegeben. "
                 + "Der Verlauf wird aus PostgreSQL gelesen. "
                 + "Der chat-service schreibt selbst NICHT in die Nachrichtentabelle.");
 
@@ -399,7 +400,7 @@ git commit -m "feat(chat-service): Projekt aufsetzen, Swagger UI erreichbar"
 
 ---
 
-## Task 2: Infrastruktur — PostgreSQL und RabbitMQ in docker-compose
+## Task 2: Infrastruktur — PostgreSQL und Kafka in docker-compose
 
 **Dateien:**
 - Erstellen: `docker-compose.yml`
@@ -411,14 +412,19 @@ git commit -m "feat(chat-service): Projekt aufsetzen, Swagger UI erreichbar"
 **Schnittstellen:**
 - Braucht aus Task 1: `application.yml`, `pom.xml`
 - Liefert: eine erreichbare Datenbank `chat` mit den Tabellen `room`, `room_member`, `message`
-  samt Demo-Daten, und einen RabbitMQ-Broker. `/actuator/health` meldet beide als `UP`.
+  samt Demo-Daten, und einen Kafka-Broker im KRaft-Modus.
 
 > **Achtung, bewusste Abweichung von der Vorgabe.** `PLANUNG.md` verlangt, dass nur Port 8080 nach
 > aussen offen ist. In diesem Bootstrap läuft der `chat-service` aber noch auf dem Host (aus der
 > IDE), nicht im Compose — er muss die Datenbank und den Broker also über `localhost` erreichen.
-> Deshalb sind `5432`, `5672` und `15672` hier **veröffentlicht**. Sobald der `chat-service` selbst
-> im Compose läuft, werden diese drei `ports:`-Einträge zu `expose:` und die Regel gilt wieder.
+> Deshalb sind `5432` und `9092` hier **veröffentlicht**. Sobald der `chat-service` selbst
+> im Compose läuft, werden diese `ports:`-Einträge zu `expose:` und die Regel gilt wieder.
 > Das ist im Plan festgehalten, damit es später nicht vergessen geht.
+
+> **Kein ZooKeeper.** Ältere Kafka-Anleitungen im Netz starten immer zwei Container: Kafka **und**
+> ZooKeeper. Seit Kafka 3.3 gibt es den **KRaft-Modus**, in dem Kafka seine Metadaten selbst
+> verwaltet; ab Kafka 4 ist ZooKeeper ganz entfallen. Wir brauchen also genau einen Container.
+> Findet ihr ein Tutorial mit ZooKeeper, ist es veraltet.
 
 - [ ] **Schritt 1: `docker-compose.yml` anlegen**
 
@@ -447,17 +453,33 @@ services:
     networks:
       - chat-net
 
-  rabbitmq:
-    image: rabbitmq:4-management-alpine
-    container_name: m321-rabbitmq
-    environment:
-      RABBITMQ_DEFAULT_USER: chat
-      RABBITMQ_DEFAULT_PASS: chat
+  kafka:
+    image: apache/kafka:4.0.0
+    container_name: m321-kafka
     ports:
       # NUR fuer den Bootstrap veroeffentlicht - siehe Hinweis im Plan.
-      - "5672:5672"
-      # Management-Oberflaeche: http://localhost:15672 (chat / chat)
-      - "15672:15672"
+      - "9092:9092"
+    environment:
+      # --- KRaft: dieser eine Container ist Broker UND Controller zugleich ---
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+
+      # Worauf der Broker HOERT (im Container).
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+
+      # Welche Adresse der Broker den Clients NENNT. Siehe Warnung unten -
+      # das ist die haeufigste Fehlerquelle bei Kafka in Docker.
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+
+      # Ein einzelner Broker kann nichts replizieren - daher ueberall 1.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # Ohne das wartet die erste Consumer-Gruppe beim Start 3 Sekunden.
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
     networks:
       - chat-net
 
@@ -550,8 +572,25 @@ docker exec -it m321-postgres psql -U chat -d chat -c "SELECT sender, text FROM 
 Erwartet: beide Container laufen, `\dt` zeigt `message`, `room`, `room_member`, und die drei
 Demo-Nachrichten in der richtigen Reihenfolge.
 
-Ausserdem <http://localhost:15672> öffnen (Anmeldung `chat` / `chat`) — die RabbitMQ-Oberfläche
-muss erscheinen. Sie wird in Task 4 gebraucht.
+Dann prüfen, dass der Broker antwortet. Kafka bringt keine Weboberfläche mit — geprüft wird mit
+den Kommandozeilenwerkzeugen, die im Container liegen:
+
+```bash
+docker exec -it m321-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
+```
+
+Erwartet: der Befehl läuft durch und gibt eine **leere** Liste aus (oder nur interne Topics).
+Wichtig ist nicht die Ausgabe, sondern dass er nicht in einen Timeout läuft — das wäre das
+Zeichen, dass der Broker nicht erreichbar ist.
+
+> **Die häufigste Kafka-Stolperfalle: `advertised.listeners`.** Ein Kafka-Client verbindet sich
+> zuerst zum `bootstrap-server` und bekommt von dort die Adressen, unter denen die Broker
+> **wirklich** erreichbar sind. Der Client spricht danach diese genannte Adresse an — nicht mehr
+> die, die er selbst eingetippt hat. Steht in `KAFKA_ADVERTISED_LISTENERS` ein Hostname, den der
+> Client nicht auflösen kann, verbindet sich der Client erfolgreich und hängt dann trotzdem im
+> Timeout. Weil der `chat-service` in diesem Bootstrap auf dem **Host** läuft, steht dort
+> `localhost:9092`. Wandert er später ins Compose, muss ein **zweiter** Listener mit dem
+> Docker-internen Namen `kafka:9092` dazukommen — sonst findet der Dienst den Broker nicht.
 
 > **Wenn das Schema später geändert wird:** die Skripte in `docker-entrypoint-initdb.d` laufen nur
 > beim allerersten Start auf ein leeres Volume. Danach hilft nur
@@ -576,10 +615,12 @@ In `chat-service/pom.xml` **vor** `spring-boot-starter-test` einfügen:
             <scope>runtime</scope>
         </dependency>
 
-        <!-- Spring AMQP: die Anbindung an RabbitMQ (Exchange, Queue, publish, ACK). -->
+        <!-- Spring Kafka: die Anbindung an Kafka (Topic, Partition, Offset, send).
+             Anders als bei den Starters oben steht hier die groupId
+             org.springframework.kafka - die Version kommt trotzdem vom Eltern-POM. -->
         <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-amqp</artifactId>
+            <groupId>org.springframework.kafka</groupId>
+            <artifactId>spring-kafka</artifactId>
         </dependency>
 ```
 
@@ -599,11 +640,22 @@ spring:
     username: chat
     password: chat
 
-  rabbitmq:
-    host: localhost
-    port: 5672
-    username: chat
-    password: chat
+  kafka:
+    # Einstiegspunkt. Von hier holt sich der Client die echten Broker-Adressen
+    # (siehe Hinweis zu advertised.listeners in Task 2).
+    bootstrap-servers: localhost:9092
+    producer:
+      # Schluessel und Wert gehen beide als Text raus: der Schluessel ist die roomId,
+      # der Wert die Nachricht als JSON-Text. Das JSON erzeugen wir selbst im
+      # MessageService - warum, steht in Task 4, Schritt 3.
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      properties:
+        # Wie lange send() hoechstens blockieren darf, wenn der Broker gar nicht
+        # erreichbar ist. Standard waeren 60 Sekunden - so lange haengt sonst jede
+        # Sendeanfrage. Die eckigen Klammern sorgen dafuer, dass Spring die Punkte
+        # im Namen stehen laesst, statt sie als Verschachtelung zu lesen.
+        "[max.block.ms]": 5000
 ```
 
 - [ ] **Schritt 7: Test laufen lassen — der Kontext muss weiterhin starten**
@@ -630,9 +682,14 @@ In einem zweiten Terminal:
 curl -s http://localhost:8080/actuator/health
 ```
 
-Erwartet: `"status":"UP"` und darin die Einträge `"db"` mit `"status":"UP"` sowie `"rabbit"` mit
-`"status":"UP"`. Das ist der Beweis, dass beide Verbindungen wirklich stehen — nicht nur, dass die
-Anwendung gestartet ist.
+Erwartet: `"status":"UP"` und darin der Eintrag `"db"` mit `"status":"UP"`. Das ist der Beweis,
+dass die Datenbankverbindung wirklich steht — nicht nur, dass die Anwendung gestartet ist.
+
+> **Kafka steht hier bewusst nicht.** Spring Boot liefert fertige Health-Indikatoren für die
+> Datenbank, für RabbitMQ, für Redis und einige andere — für Kafka aber **keinen**. Es ist also
+> kein Fehler, wenn in `/actuator/health` kein Kafka-Eintrag auftaucht; den gibt es schlicht
+> nicht. Dass der Broker erreichbar ist, haben wir in Task 2 mit `kafka-topics.sh --list`
+> geprüft, und in Task 4 sehen wir die Nachricht im Topic ankommen.
 
 Anwendung mit `Ctrl+C` beenden.
 
@@ -641,7 +698,7 @@ Anwendung mit `Ctrl+C` beenden.
 ```bash
 cd it3b-m321
 git add docker-compose.yml db/ chat-service/
-git commit -m "feat(infra): PostgreSQL und RabbitMQ in docker-compose, Schema und Demo-Daten"
+git commit -m "feat(infra): PostgreSQL und Kafka in docker-compose, Schema und Demo-Daten"
 ```
 
 ---
@@ -692,7 +749,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 /**
  * Testet den Controller allein. @WebMvcTest startet nur die Webschicht, nicht die
- * ganze Anwendung - deshalb braucht dieser Test weder Datenbank noch RabbitMQ.
+ * ganze Anwendung - deshalb braucht dieser Test weder Datenbank noch Kafka.
  * Der Service wird durch eine Attrappe (@MockitoBean) ersetzt, die wir steuern.
  */
 @WebMvcTest(MessageController.class)
@@ -856,7 +913,7 @@ import org.springframework.stereotype.Service;
 
 /**
  * Fachlogik rund um Nachrichten. Der Controller kennt nur diese Klasse, nicht das
- * Repository und nicht RabbitMQ - so bleibt die Weboberflaeche von der Technik
+ * Repository und nicht Kafka - so bleibt die Weboberflaeche von der Technik
  * dahinter getrennt.
  */
 @Service
@@ -927,7 +984,7 @@ public class MessageController {
     /**
      * Liefert die letzten Nachrichten eines Raums, neueste zuerst.
      * Gelesen wird direkt aus der Datenbank - dieser Weg laeuft voellig getrennt
-     * vom Senden ueber RabbitMQ.
+     * vom Senden ueber Kafka.
      */
     @Operation(
             summary = "Verlauf eines Raums lesen",
@@ -999,10 +1056,10 @@ git commit -m "feat(chat-service): GET /api/messages liest den Verlauf, dokument
 
 ---
 
-## Task 4: Nachricht senden — `POST /api/messages` publiziert auf den Fanout-Exchange
+## Task 4: Nachricht senden — `POST /api/messages` schreibt auf das Topic
 
 **Dateien:**
-- Erstellen: `chat-service/src/main/java/ch/benedict/m321/chat/rabbit/RabbitConfiguration.java`
+- Erstellen: `chat-service/src/main/java/ch/benedict/m321/chat/kafka/KafkaConfiguration.java`
 - Erstellen: `chat-service/src/main/java/ch/benedict/m321/chat/message/NewMessage.java`
 - Ändern: `chat-service/src/main/java/ch/benedict/m321/chat/message/MessageService.java`
 - Ändern: `chat-service/src/main/java/ch/benedict/m321/chat/message/MessageController.java`
@@ -1011,7 +1068,7 @@ git commit -m "feat(chat-service): GET /api/messages liest den Verlauf, dokument
 **Schnittstellen:**
 - Braucht aus Task 3: `Message`, `MessageService`, `MessageController`
 - Liefert für spätere Pläne:
-  - `RabbitConfiguration.EXCHANGE_NAME` = `"chat.messages"`
+  - `KafkaConfiguration.TOPIC_NAME` = `"chat.messages"`
   - `record NewMessage(UUID roomId, String sender, String text)`
   - `Message MessageService.sendMessage(NewMessage incoming)`
 
@@ -1021,12 +1078,14 @@ In `MessageControllerTest` **ergänzen**. Zuerst diese beiden Importe zu den bes
 (als echte `import`-Zeilen, nicht als Kommentar):
 
 ```java
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.web.server.ResponseStatusException;
 
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 ```
 
-`any` ist bereits importiert. Dann die beiden Testmethoden in die Klasse einfügen:
+`any` ist bereits importiert. Dann die drei Testmethoden in die Klasse einfügen:
 
 ```java
     @Test
@@ -1072,6 +1131,29 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
                         .content(body))
                 .andExpect(status().isBadRequest());
     }
+
+    @Test
+    void sendReturns503WhenKafkaDoesNotConfirm() throws Exception {
+        // Die Attrappe verhaelt sich so wie der echte Service, wenn Kafka die
+        // Nachricht nicht rechtzeitig bestaetigt: sie wirft eine 503-Ausnahme.
+        ResponseStatusException notConfirmed = new ResponseStatusException(
+                HttpStatus.SERVICE_UNAVAILABLE, "Kafka hat nicht bestaetigt");
+        when(messageService.sendMessage(any())).thenThrow(notConfirmed);
+
+        String body = """
+                {
+                  "roomId": "11111111-1111-1111-1111-111111111111",
+                  "sender": "lernende1",
+                  "text": "Kommt diese Nachricht an?"
+                }
+                """;
+
+        // Der Client muss erfahren, dass nichts angenommen wurde - kein 202.
+        mockMvc.perform(post("/api/messages")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isServiceUnavailable());
+    }
 ```
 
 - [ ] **Schritt 2: Tests laufen lassen — sie müssen fehlschlagen**
@@ -1084,59 +1166,75 @@ mvn test
 
 Erwartet: **FEHLSCHLAG beim Kompilieren** — `sendMessage` gibt es am Service noch nicht.
 
-- [ ] **Schritt 3: Die RabbitMQ-Konfiguration schreiben**
+- [ ] **Schritt 3: Die Kafka-Konfiguration schreiben**
 
-Datei `chat-service/src/main/java/ch/benedict/m321/chat/rabbit/RabbitConfiguration.java`:
+Datei `chat-service/src/main/java/ch/benedict/m321/chat/kafka/KafkaConfiguration.java`:
 
 ```java
-package ch.benedict.m321.chat.rabbit;
+package ch.benedict.m321.chat.kafka;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import org.springframework.amqp.core.FanoutExchange;
-import org.springframework.amqp.support.converter.Jackson2JsonMessageConverter;
+import org.apache.kafka.clients.admin.NewTopic;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.kafka.config.TopicBuilder;
 
 /**
- * Legt fest, wie der chat-service mit RabbitMQ spricht.
+ * Legt fest, wie der chat-service mit Kafka spricht.
  *
- * Ein Fanout-Exchange verteilt jede Nachricht an ALLE Queues, die an ihm haengen -
- * ohne auf einen Schluessel zu schauen. Genau das brauchen wir: eine Kopie fuer
- * jede chat-service-Instanz (Anzeige) und eine fuer den batch-service (Speichern).
+ * Ein Topic ist ein fortlaufendes Protokoll (ein "Log"), in das geschrieben wird.
+ * Jede Consumer-Gruppe, die es liest, bekommt eine EIGENE vollstaendige Kopie und
+ * merkt sich selbst, wie weit sie gekommen ist. Genau das brauchen wir: eine Kopie
+ * fuer jede chat-service-Instanz (Anzeige) und eine fuer den batch-service (Speichern).
  */
 @Configuration
-public class RabbitConfiguration {
+public class KafkaConfiguration {
 
-    /** Name des Exchange, auf den jede neue Nachricht publiziert wird. */
-    public static final String EXCHANGE_NAME = "chat.messages";
-
-    /**
-     * Meldet den Exchange beim Broker an. Spring legt ihn beim Start automatisch
-     * an, falls es ihn noch nicht gibt - man muss in der Management-UI nichts klicken.
-     *
-     * "durable" heisst: der Exchange ueberlebt einen Neustart des Brokers.
-     * "autoDelete = false" heisst: er verschwindet nicht, wenn gerade keine Queue dranhaengt.
-     */
-    @Bean
-    public FanoutExchange chatExchange() {
-        return new FanoutExchange(EXCHANGE_NAME, true, false);
-    }
+    /** Name des Topics, auf das jede neue Nachricht geschrieben wird. */
+    public static final String TOPIC_NAME = "chat.messages";
 
     /**
-     * Wandelt Nachrichten beim Senden in JSON um. Ohne diese Bean wuerde Spring die
-     * Objekte in ein Java-eigenes Binaerformat serialisieren - in der Management-UI
-     * waere dann nur Zeichensalat zu sehen.
+     * Wie viele Partitionen das Topic bekommt. Eine Partition ist ein Teilstueck des
+     * Logs; Kafka garantiert die Reihenfolge nur INNERHALB einer Partition. Weil wir
+     * die roomId als Schluessel senden, landen alle Nachrichten eines Raums in
+     * derselben Partition - und damit garantiert in Sendereihenfolge.
      *
-     * Wir reichen absichtlich den ObjectMapper von Spring Boot herein: der ist so
-     * eingestellt, dass Zeitpunkte als lesbares "2026-09-04T08:05:00Z" geschrieben
-     * werden und nicht als blosse Zahl.
+     * Mehr Partitionen erlauben spaeter mehr parallele Leser. 6 ist ein Startwert.
+     */
+    private static final int PARTITIONS = 6;
+
+    /**
+     * Meldet das Topic beim Broker an. Spring legt es beim Start automatisch an,
+     * falls es noch nicht existiert - man muss auf der Kommandozeile nichts anlegen.
+     *
+     * replicas(1), weil in docker-compose genau ein Broker laeuft. Ein einzelner
+     * Broker kann nichts replizieren; jede hoehere Zahl wuerde beim Anlegen scheitern.
      */
     @Bean
-    public Jackson2JsonMessageConverter jsonMessageConverter(ObjectMapper objectMapper) {
-        return new Jackson2JsonMessageConverter(objectMapper);
+    public NewTopic chatTopic() {
+        return TopicBuilder.name(TOPIC_NAME)
+                .partitions(PARTITIONS)
+                .replicas(1)
+                .build();
     }
 }
 ```
+
+> **Warum hier keine Bean für JSON steht — und warum wir nicht den `JsonSerializer` nehmen.**
+> Kafka kennt keine Konverter, sondern **Serializer**, und die stehen in `application.yml`
+> (Task 2, Schritt 6). Spring Kafka hätte einen fertigen `JsonSerializer`. Wir nehmen trotzdem
+> den einfachen `StringSerializer` und wandeln die Nachricht im `MessageService` selbst in
+> JSON um, aus zwei Gründen:
+>
+> 1. Der `JsonSerializer` benutzt **seinen eigenen** `ObjectMapper`, nicht den von Spring Boot.
+>    Der schreibt ein `Instant` als Zahl (`1757577900.000000000`) statt als lesbares
+>    `2026-09-04T08:05:00Z`.
+> 2. Er hängt jeder Nachricht einen Header `__TypeId__` mit dem vollen Klassennamen an
+>    (`ch.benedict.m321.chat.message.Message`). Der `batch-service` hat diese Klasse nicht —
+>    er ist ein eigener Dienst mit eigenem Paket — und würde beim Lesen scheitern.
+>
+> Mit JSON als Text steht auf dem Topic genau das, was jeder Dienst lesen kann, ohne die
+> Klassen eines anderen Dienstes zu kennen. Das ist das Modulthema: Dienste teilen ein
+> **Datenformat**, keinen Code.
 
 - [ ] **Schritt 4: Den Request-Datensatz schreiben**
 
@@ -1179,19 +1277,40 @@ Zusätzliche Importe:
 
 ```java
 import java.time.Instant;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
-import ch.benedict.m321.chat.rabbit.RabbitConfiguration;
-import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import ch.benedict.m321.chat.kafka.KafkaConfiguration;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.kafka.clients.producer.RecordMetadata;
+import org.springframework.http.HttpStatus;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.support.SendResult;
+import org.springframework.web.server.ResponseStatusException;
 ```
 
 Felder und Konstruktor (ersetzen die bisherige Fassung):
 
 ```java
-    private final RabbitTemplate rabbitTemplate;
+    /** So lange warten wir hoechstens auf die Bestaetigung von Kafka. Passt zu max.block.ms. */
+    private static final int SEND_TIMEOUT_SECONDS = 5;
+
+    private final KafkaTemplate<String, String> kafkaTemplate;
+    private final ObjectMapper objectMapper;
     private final MessageRepository messageRepository;
 
-    public MessageService(RabbitTemplate rabbitTemplate, MessageRepository messageRepository) {
-        this.rabbitTemplate = rabbitTemplate;
+    /**
+     * Den ObjectMapper reicht Spring Boot herein. Er ist so eingestellt, dass Zeitpunkte
+     * als lesbarer Text geschrieben werden - siehe Hinweis in Schritt 3.
+     */
+    public MessageService(KafkaTemplate<String, String> kafkaTemplate,
+                          ObjectMapper objectMapper,
+                          MessageRepository messageRepository) {
+        this.kafkaTemplate = kafkaTemplate;
+        this.objectMapper = objectMapper;
         this.messageRepository = messageRepository;
     }
 ```
@@ -1200,7 +1319,7 @@ Neue Methode (anfügen):
 
 ```java
     /**
-     * Nimmt eine neue Nachricht an und gibt sie an RabbitMQ weiter.
+     * Nimmt eine neue Nachricht an und gibt sie an Kafka weiter.
      *
      * Wichtig: hier wird NICHT in die Datenbank geschrieben. Der chat-service
      * publiziert nur; gespeichert wird spaeter gebuendelt vom batch-service
@@ -1221,14 +1340,85 @@ Neue Methode (anfügen):
         log.info("Nachricht {} von {} fuer Raum {} wird publiziert",
                 id, incoming.sender(), incoming.roomId());
 
-        // Zweites Argument ist der Routing-Key. Ein Fanout-Exchange ignoriert ihn,
-        // deshalb steht dort der leere String.
-        rabbitTemplate.convertAndSend(RabbitConfiguration.EXCHANGE_NAME, "", message);
+        // Zweites Argument ist der SCHLUESSEL. Kafka rechnet daraus die Partition
+        // aus: gleicher Schluessel -> gleiche Partition -> garantierte Reihenfolge.
+        // Deshalb steht hier die roomId - alle Nachrichten eines Raums bleiben in
+        // der Reihenfolge, in der sie gesendet wurden.
+        String partitionKey = incoming.roomId().toString();
+        String json = toJson(message);
 
-        log.info("Nachricht {} an Exchange {} uebergeben", id, RabbitConfiguration.EXCHANGE_NAME);
+        // send() kehrt sofort zurueck und liefert nur ein "Versprechen" (CompletableFuture).
+        // Der eigentliche Versand laeuft im Hintergrund, in einem Thread des Kafka-Clients.
+        CompletableFuture<SendResult<String, String>> pending =
+                kafkaTemplate.send(KafkaConfiguration.TOPIC_NAME, partitionKey, json);
+
+        // Wir warten trotzdem auf die Bestaetigung. Sonst meldeten wir dem Client
+        // "202 angenommen" fuer eine Nachricht, die vielleicht nie angekommen ist.
+        SendResult<String, String> result = waitForKafka(pending, id);
+
+        // Kafka meldet zurueck, WO die Nachricht gelandet ist. Im Log sieht man so,
+        // dass alle Nachrichten eines Raums immer in derselben Partition landen.
+        RecordMetadata metadata = result.getRecordMetadata();
+        log.info("Nachricht {} liegt auf {} in Partition {} an Offset {}",
+                id, KafkaConfiguration.TOPIC_NAME, metadata.partition(), metadata.offset());
         return message;
     }
+
+    /**
+     * Wartet hoechstens SEND_TIMEOUT_SECONDS auf die Bestaetigung von Kafka. Kommt sie
+     * nicht, antwortet der chat-service mit 503: der Chat nimmt sichtbar nichts an,
+     * statt still Nachrichten zu verlieren (PLANUNG.md, Abschnitt 2.4).
+     */
+    private SendResult<String, String> waitForKafka(
+            CompletableFuture<SendResult<String, String>> pending, UUID id) {
+        try {
+            return pending.get(SEND_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        } catch (ExecutionException | TimeoutException failure) {
+            log.warn("Nachricht {} wurde von Kafka nicht bestaetigt: {}", id, failure.toString());
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
+                    "Nachricht konnte nicht weitergegeben werden - bitte spaeter erneut senden");
+        } catch (InterruptedException interrupted) {
+            // Der Thread wurde beim Warten unterbrochen, zum Beispiel beim Herunterfahren.
+            // Wir setzen die Unterbrechungs-Markierung wieder, damit der Aufrufer davon erfaehrt.
+            Thread.currentThread().interrupt();
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
+                    "Senden wurde unterbrochen");
+        }
+    }
+
+    /**
+     * Wandelt eine Nachricht in JSON-Text um, so wie sie auf dem Topic stehen soll.
+     * Jeder andere Dienst kann diesen Text lesen, ohne unsere Klassen zu kennen.
+     */
+    private String toJson(Message message) {
+        try {
+            return objectMapper.writeValueAsString(message);
+        } catch (JsonProcessingException impossible) {
+            // Ein record aus UUID, String und Instant laesst sich immer umwandeln.
+            // Landet der Code trotzdem hier, ist das ein Programmierfehler, kein Benutzerfehler.
+            throw new IllegalStateException(
+                    "Nachricht " + message.id() + " liess sich nicht in JSON umwandeln", impossible);
+        }
+    }
 ```
+
+> **Warum wir auf `send(...)` warten.** `send` selbst wartet nicht: es gibt ein
+> `CompletableFuture` zurück, und ein Fehler beim Senden taucht **nicht** als Exception an dieser
+> Zeile auf. Ohne das Warten würde der Client bei ausgefallenem Broker trotzdem `202` bekommen —
+> und die Nachricht wäre still verloren. Genau das schliesst `PLANUNG.md` (Abschnitt 2.4) aus.
+> Deshalb wartet `waitForKafka` höchstens 5 Sekunden und antwortet sonst mit `503`. Der Preis:
+> jede Sendeanfrage dauert so lange, bis Kafka bestätigt hat — normalerweise wenige Millisekunden.
+>
+> **Ehrlich benannt: `503` heisst «nicht bestätigt», nicht «sicher verloren».** Der Kafka-Client
+> versucht es im Hintergrund weiter. Kommt die Nachricht nach unserem Zeitlimit doch noch an und
+> sendet der Nutzer erneut, steht sie zweimal im Chat — mit zwei verschiedenen UUIDs, die
+> `ON CONFLICT` nicht als Dublette erkennt. Das ist das Grundproblem jeder Übertragung über ein
+> Netz: bei einer ausbleibenden Antwort weiss der Absender nicht, ob sie unterwegs verloren ging
+> oder nur zu spät kam. Die saubere Antwort (der Client vergibt die ID selbst) gehört in einen
+> späteren Plan.
+>
+> **Ausnahme im Stil.** Der Service wirft hier eine `ResponseStatusException` — eigentlich eine
+> Klasse aus der Webschicht. Das ist eine bewusste Abkürzung, siehe «Entscheide» unten.
 
 - [ ] **Schritt 6: Den Controller um `POST` erweitern**
 
@@ -1244,7 +1434,7 @@ Neue Methode:
 
 ```java
     /**
-     * Nimmt eine Nachricht entgegen und gibt sie an RabbitMQ weiter.
+     * Nimmt eine Nachricht entgegen und gibt sie an Kafka weiter.
      *
      * Die Antwort ist 202 Accepted und nicht 201 Created: wir haben die Nachricht
      * angenommen und weitergegeben, gespeichert ist sie in diesem Moment noch nicht.
@@ -1252,12 +1442,13 @@ Neue Methode:
      */
     @Operation(
             summary = "Nachricht senden",
-            description = "Nimmt eine Nachricht an und publiziert sie auf den Fanout-Exchange "
-                        + "'chat.messages'. Die Antwort kommt sofort. Gespeichert wird die "
-                        + "Nachricht kurz danach vom batch-service - sie erscheint also erst "
-                        + "mit kleiner Verzoegerung im Verlauf.")
-    @ApiResponse(responseCode = "202", description = "Nachricht angenommen und publiziert")
+            description = "Nimmt eine Nachricht an und schreibt sie auf das Kafka-Topic "
+                        + "'chat.messages'. Die Antwort kommt, sobald Kafka den Empfang bestaetigt "
+                        + "hat. Gespeichert wird die Nachricht kurz danach vom batch-service - sie "
+                        + "erscheint also erst mit kleiner Verzoegerung im Verlauf.")
+    @ApiResponse(responseCode = "202", description = "Nachricht angenommen und auf das Topic geschrieben")
     @ApiResponse(responseCode = "400", description = "roomId fehlt oder der Text ist leer")
+    @ApiResponse(responseCode = "503", description = "Kafka hat nicht rechtzeitig bestaetigt - bitte spaeter erneut senden")
     @PostMapping
     public ResponseEntity<Message> send(@RequestBody NewMessage incoming) {
 
@@ -1296,7 +1487,7 @@ Neue Methode:
 mvn test
 ```
 
-Erwartet: **BESTANDEN.** `Tests run: 4, Failures: 0, Errors: 0`.
+Erwartet: **BESTANDEN.** `Tests run: 5, Failures: 0, Errors: 0`.
 
 > **Docker muss laufen.** Seit Task 2 fährt `ChatServiceApplicationTest` die ganze
 > Anwendung hoch und braucht dafür Datenbank und Broker. Vorher im
@@ -1304,25 +1495,32 @@ Erwartet: **BESTANDEN.** `Tests run: 4, Failures: 0, Errors: 0`.
 
 - [ ] **Schritt 8: Von Hand prüfen — die Nachricht muss wirklich im Broker landen**
 
-Ein grüner Test beweist nur, dass der Controller den Service ruft. Ob RabbitMQ die Nachricht
+Ein grüner Test beweist nur, dass der Controller den Service ruft. Ob Kafka die Nachricht
 bekommt, sieht man nur im Broker.
 
-> **Wichtig für das Verständnis:** an `chat.messages` hängt in dieser Phase **keine** Queue. Ein
-> Exchange speichert nichts — er verteilt nur. Ohne gebundene Queue verschwindet jede publizierte
-> Nachricht **spurlos**, ohne Fehler und ohne Log-Eintrag. Deshalb legen wir unten von Hand eine
-> Test-Queue an: sonst gäbe es nichts zu sehen. Die richtigen Queues (`chat.persist` und
-> `chat.live.<instanz>`) kommen mit dem `batch-service` und dem SSE-Plan.
+> **Wichtig für das Verständnis — und ein echter Unterschied zu RabbitMQ:** Ein Kafka-Topic
+> **speichert**, was hineingeschrieben wird, auch wenn gerade **niemand** zuhört. Die Nachricht
+> bleibt im Log liegen, bis die Aufbewahrungszeit abläuft. Bei RabbitMQ wäre eine Nachricht an
+> einen Exchange ohne gebundene Queue **spurlos** verschwunden; hier können wir den Leser
+> gemütlich **nach** dem Senden starten und die Nachricht trotzdem noch sehen. Genau deshalb
+> braucht es unten auch keine Hilfskonstruktion.
 
 ```bash
 docker compose up -d
 cd chat-service && mvn spring-boot:run
 ```
 
-1. <http://localhost:15672> öffnen (`chat` / `chat`).
-2. Unter **Exchanges** muss `chat.messages` stehen, Typ `fanout`, Merkmal `D` (durable).
-3. Unter **Queues and Streams** → *Add a new queue* eine Queue `test.listen` anlegen.
-4. `chat.messages` anklicken → *Bindings* → *To queue* `test.listen` → *Bind*.
-5. In Swagger UI `POST /api/messages` ausführen mit:
+1. Prüfen, dass Spring das Topic beim Start angelegt hat:
+
+```bash
+docker exec -it m321-kafka /opt/kafka/bin/kafka-topics.sh \
+  --bootstrap-server localhost:9092 --describe --topic chat.messages
+```
+
+Erwartet: das Topic existiert mit **6** Partitionen und `ReplicationFactor: 1`. Das ist der
+Beweis, dass die `NewTopic`-Bean aus Schritt 3 wirklich gewirkt hat.
+
+2. In Swagger UI `POST /api/messages` ausführen mit:
 
 ```json
 {
@@ -1332,33 +1530,46 @@ cd chat-service && mvn spring-boot:run
 }
 ```
 
-6. Antwort muss **202** sein, mit `id` und `sentAt` vom Server gesetzt.
-7. Im Broker: Queue `test.listen` hat **1** Nachricht. *Get messages* → der Payload ist lesbares
-   JSON mit `"text":"Erste Nachricht durch den Broker"` und einem Zeitpunkt in der Form
-   `2026-09-04T08:05:00Z`.
+3. Antwort muss **202** sein, mit `id` und `sentAt` vom Server gesetzt.
+
+4. Jetzt erst den Leser starten — die Nachricht liegt ja im Log und läuft nicht weg:
+
+```bash
+docker exec -it m321-kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 --topic chat.messages \
+  --from-beginning --property print.key=true
+```
+
+Erwartet: eine Zeile mit der `roomId` als Schlüssel, einem Tabulator, und danach lesbarem JSON
+mit `"text":"Erste Nachricht durch den Broker"` und einem Zeitpunkt in der Form
+`2026-09-04T08:05:00Z`. Mit `Ctrl+C` beenden — der Consumer wartet sonst weiter auf Neues.
+
+> `--from-beginning` heisst: ab dem Anfang des Logs lesen. Lässt man es weg, zeigt der Consumer
+> nur, was **ab jetzt** ankommt — genau das Verhalten, das später die Live-Anzeige braucht
+> (`auto.offset.reset: latest`, siehe `PLANUNG.md`, Abschnitt 2.4). Man kann beides hier direkt
+> ausprobieren: einmal mit, einmal ohne, und zwischendurch eine Nachricht senden.
 
 Erwartet ist ausserdem: `GET /api/messages` liefert diese Nachricht **nicht** — sie steht ja nicht
 in der Datenbank. Genau das ist der Beweis, dass Senden und Speichern getrennt sind. Der
 `batch-service` schliesst diese Lücke im nächsten Plan.
-
-8. Test-Queue danach wieder löschen, damit sie nicht unbemerkt volläuft.
 
 - [ ] **Schritt 9: Commit**
 
 ```bash
 cd it3b-m321
 git add chat-service/
-git commit -m "feat(chat-service): POST /api/messages publiziert auf den Fanout-Exchange"
+git commit -m "feat(chat-service): POST /api/messages schreibt auf das Kafka-Topic"
 ```
 
 ---
 
 ## Fertig, wenn …
 
-- [ ] `mvn test` im Verzeichnis `chat-service` ist grün (4 Tests)
-- [ ] `docker compose up -d` bringt PostgreSQL und RabbitMQ hoch, `/actuator/health` meldet beide `UP`
+- [ ] `mvn test` im Verzeichnis `chat-service` ist grün (5 Tests)
+- [ ] `docker compose up -d` bringt PostgreSQL und Kafka hoch; `/actuator/health` meldet `db` als
+      `UP`, und `kafka-topics.sh --list` antwortet ohne Timeout
 - [ ] <http://localhost:8080/swagger-ui.html> zeigt den Bereich «Nachrichten» mit **beiden** Endpunkten,
-      jeweils mit Beschreibung, Beispielwerten und den Antwortcodes 200/202/400
+      jeweils mit Beschreibung, Beispielwerten und den Antwortcodes 200/202/400/503
 - [ ] `GET /api/messages` liefert die drei Demo-Nachrichten
 - [ ] `POST /api/messages` antwortet mit 202, und die Nachricht ist im Broker sichtbar
 - [ ] Fünf Commits liegen vor (Dokumente + vier Bau-Schritte)
@@ -1368,19 +1579,20 @@ git commit -m "feat(chat-service): POST /api/messages publiziert auf den Fanout-
 ## Übungsaufgabe für die Klasse
 
 Wird der Code an die Lernenden gegeben, **vor dem Austeilen** in
-`rabbit/RabbitConfiguration.java` den Rumpf von `chatExchange()` entfernen und ersetzen durch:
+`kafka/KafkaConfiguration.java` den Rumpf von `chatTopic()` entfernen und ersetzen durch:
 
 ```java
     @Bean
-    public FanoutExchange chatExchange() {
-        // TODO Übung: Einen Fanout-Exchange mit dem Namen aus EXCHANGE_NAME zurückgeben.
-        //             Er soll einen Broker-Neustart überleben und nicht automatisch
-        //             gelöscht werden, wenn gerade keine Queue an ihm hängt.
+    public NewTopic chatTopic() {
+        // TODO Übung: Ein Topic mit dem Namen aus TOPIC_NAME zurückgeben.
+        //             Es soll PARTITIONS Partitionen haben. Weil in docker-compose
+        //             nur ein einziger Broker läuft, kann es nicht repliziert werden.
     }
 ```
 
-Umfang: **eine Zeile.** Gebraucht wird die Konstante `EXCHANGE_NAME` und der Konstruktor von
-`FanoutExchange`, der neben dem Namen zwei Wahrheitswerte nimmt.
+Umfang: **zwei bis drei Zeilen.** Gebraucht werden die Konstanten `TOPIC_NAME` und `PARTITIONS`
+sowie `TopicBuilder` mit seinen Methoden `name(...)`, `partitions(...)`, `replicas(...)` und
+`build()`. Die Frage, welche Zahl bei `replicas` stehen muss, ist der eigentliche Lerninhalt.
 
 Diese Stelle ist mit Absicht gewählt: fehlt die Zeile, **kompiliert die Datei nicht** («missing
 return statement»). Die Aufgabe kann also nicht stillschweigend falsch laufen — sie ist entweder
@@ -1392,9 +1604,12 @@ gelöst oder der Fehler steht sofort da. Der Rest des Dienstes bleibt unverände
 
 | Thema | Wo es im Code steht |
 |---|---|
-| **Fanout-Exchange** — verteilt an alle gebundenen Queues, ignoriert den Routing-Key | `RabbitConfiguration`, Schritt 8 in Task 4 |
+| **Topic und Partitionen** — ein Log, der auch ohne Leser aufbewahrt; jede Consumer-Gruppe bekommt eine eigene Kopie | `KafkaConfiguration`, Schritt 8 in Task 4 |
+| **Schlüssel bestimmt die Partition** — gleicher Schlüssel, gleiche Partition, garantierte Reihenfolge | `MessageService.sendMessage` (`roomId` als Schlüssel) |
+| **`advertised.listeners`** — der Broker nennt dem Client die Adresse, unter der er erreichbar ist | `docker-compose.yml`, Hinweis in Task 2 |
 | **Publizieren statt Schreiben** — warum der Absender-Dienst die Datenbank nicht anfasst | `MessageService.sendMessage` |
 | **202 statt 201** — angenommen ist nicht gespeichert | `MessageController.send` |
+| **Asynchron senden, trotzdem bestätigen lassen** — `CompletableFuture`, Zeitlimit, `503` | `MessageService.waitForKafka` |
 | **ID und Zeitstempel beim Sender** — Voraussetzung fürs spätere Bündeln | `MessageService.sendMessage` |
 | **Schichten** — Controller kennt nur den Service, der Service nur das Repository | alle drei Klassen im Paket `message` |
 | **Prepared Statements** — Werte als `?`, nie in den SQL-String geklebt | `MessageRepository.findLatest` |
@@ -1409,12 +1624,15 @@ gelöst oder der Fehler steht sofort da. Der Rest des Dienstes bleibt unverände
 | Entscheid | Begründung | Wenn es anders sein soll |
 |---|---|---|
 | **Englische Bezeichner, deutsche Kommentare** | Java, Spring und SQL bringen englisches Vokabular mit; gemischte Bezeichner wie `findeLetzteByRaumId` liest niemand gern. Erklärt wird trotzdem auf Deutsch. | — |
-| **Spring Boot 3.5.16, nicht 4.x** | Boot 4 ist draussen, aber für den Unterricht zählt die Menge an Material: praktisch jedes Tutorial, jede Antwort im Netz und die ganze springdoc-2.x-Linie zielen auf Boot 3. springdoc 2.9.0 wird exakt gegen 3.5.16 gebaut. | Umstellen kostet den Wechsel auf springdoc 3.x und Spring AMQP 4 (dort heisst der Wandler `JacksonJsonMessageConverter`) |
+| **Spring Boot 3.5.16, nicht 4.x** | Boot 4 ist draussen, aber für den Unterricht zählt die Menge an Material: praktisch jedes Tutorial, jede Antwort im Netz und die ganze springdoc-2.x-Linie zielen auf Boot 3. springdoc 2.9.0 wird exakt gegen 3.5.16 gebaut. | Umstellen kostet den Wechsel auf springdoc 3.x und eine neuere Spring-Kafka-Linie |
 | **`JdbcTemplate` statt JPA/Hibernate** | `CLAUDE.md` verbietet Annotation-Magie. Beim `JdbcTemplate` steht das SQL im Klartext und jede Spalte wird sichtbar in ein Feld übertragen. Ausserdem benutzt der `batch-service` ohnehin `batchUpdate`. | JPA wäre ein eigenes Kapitel — dann aber bewusst als Thema, nicht nebenbei |
 | **Methodenreferenz `this::mapRow`** | Kürzer und benannt — man sieht am Namen, was passiert, statt einen Lambda-Rumpf mitten in der Abfrage zu lesen. | Falls Methodenreferenzen im Unterricht noch nicht dran waren: durch `(row, rowNumber) -> mapRow(row, rowNumber)` ersetzen oder eine benannte `RowMapper<Message>`-Klasse anlegen |
 | **`record` statt Klasse mit Gettern** | Eine Zeile statt dreissig, und unveränderlich. Kein Lombok nötig. | Falls `record` im Unterricht noch nicht behandelt wurde: `Message` und `NewMessage` als normale Klassen mit Konstruktor und Gettern schreiben — sonst ändert sich nichts |
 | **SQL-Init-Skripte statt Flyway** | Das Postgres-Image führt `/docker-entrypoint-initdb.d` von sich aus aus. Kein Werkzeug, kein Namensschema, kein zusätzliches Konzept. | Bei Schema-Änderungen `docker compose down -v` nötig. Sobald das nervt, ist Flyway die Antwort |
 | **`TIMESTAMPTZ` statt `TIMESTAMP`** | Ohne Zeitzone geht die Zone beim Speichern verloren, und `Instant` ist genau ein Zeitpunkt in UTC. | — (`PLANUNG.md` ist bereits nachgezogen) |
+| **JSON als Text mit `StringSerializer` statt `JsonSerializer`** | Der `JsonSerializer` von Spring Kafka schreibt Zeitpunkte als Zahl und hängt einen `__TypeId__`-Header mit dem Klassennamen des Senders an, an dem der `batch-service` scheitern würde. JSON-Text ist das neutrale Format zwischen Diensten. | `JsonSerializer` mit dem ObjectMapper von Spring Boot und `spring.json.add.type.headers: false` — geht, braucht aber eine eigene `ProducerFactory`-Bean |
+| **Auf die Bestätigung von Kafka warten, sonst `503`** | Ohne Warten bekäme der Client bei ausgefallenem Broker `202`, und die Nachricht wäre still verloren — genau das schliesst `PLANUNG.md` 2.4 aus. | Nicht warten und nur loggen (`whenComplete`) — schneller, aber der Client erfährt nie von einem Verlust |
+| **`ResponseStatusException` im Service statt in der Webschicht** | Eine Zeile statt einer eigenen Exception-Klasse und eines `@ExceptionHandler`. Für den Bootstrap reicht das. | Eigene `BrokerUnavailableException` im Service, Umwandlung in `503` per `@ExceptionHandler` im Controller — sauberer getrennt, ein Konzept mehr |
 | **`sender` im Request-Body** | Es gibt noch kein Token. Das Feld ist in Swagger ausdrücklich als Platzhalter markiert. | Fällt weg, sobald Keycloak steht — der Name kommt dann aus `preferred_username` |
 | **Tests nur mit `MockMvc`** | Läuft ohne Docker und prüft genau das, was die API verspricht. | Repository und Broker werden hier von Hand geprüft (Schritte 8). Echte Integrationstests brauchen Testcontainers — eigener Plan |
 | **Kein Eltern-POM** | Jeder Dienst ist eigenständig baubar — das ist das Modulthema. | Bei vier Diensten wird die Wiederholung lästig; dann ein Eltern-POM nachziehen |
@@ -1425,11 +1643,13 @@ gelöst oder der Fehler steht sofort da. Der Rest des Dienstes bleibt unverände
 
 Diese Pläne bauen auf dem Bootstrap auf, in dieser Reihenfolge:
 
-1. **`batch-service`** — Consumer auf `chat.persist`, zuerst einzeln schreiben, dann bündeln und den
-   Unterschied messen (`PLANUNG.md`, Abschnitt 2.3 und 2.4).
+1. **`batch-service`** — Consumer-Gruppe `batch-service` auf `chat.messages`, zuerst einzeln
+   schreiben, dann bündeln (`batch = "true"`, `ack-mode: MANUAL`) und den Unterschied messen
+   (`PLANUNG.md`, Abschnitt 2.3 und 2.4).
 2. **Raumverwaltung** — `POST /api/rooms`, Einladen per Benutzername, Mitgliedsprüfung beim Senden
    und Lesen.
 3. **Keycloak** — Realm-Import, Token-Prüfung, `sender` aus dem Token.
-4. **SSE** — `GET /stream`, Live-Queue je Instanz, `@RabbitListener`.
+4. **SSE** — `GET /stream`, eigene flüchtige Consumer-Gruppe je Instanz
+   (`auto.offset.reset: latest`), `@KafkaListener`.
 5. **Gateway und React-App** — nginx als einziger offener Port, `chat-service` wandert ins Compose
    und die veröffentlichten Ports aus Task 2 werden wieder zu `expose`.
