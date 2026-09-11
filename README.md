@@ -1,4 +1,4 @@
-# M321 — Chat-App (Klasse IT3b, Schule Benedict)
+# M321 — Chat-App (Klasse IT3b)
 
 Lernprojekt zum Modul **M321 Verteilte Systeme / Microservices**. Wir bauen gemeinsam eine
 Chat-Anwendung aus mehreren Services, die über eine Message Queue miteinander reden und mit
