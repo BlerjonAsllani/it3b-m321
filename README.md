@@ -43,7 +43,7 @@ erreichbar.
   — Schritt-für-Schritt-Plan für den ersten Service: Projekt anlegen, Datenbank und Broker
   anbinden, Nachrichten lesen und senden. Jeder Schritt mit Test.
 - [`CLAUDE.md`](CLAUDE.md) — Codestil-Regeln für dieses Projekt. Gelten auch für dich.
-- `IMG_3379 (1).heic` — die Handskizze aus dem Unterricht, von der die Planung ausgeht.
+- `docs/skizze-architektur.heic` — die Handskizze aus dem Unterricht, von der die Planung ausgeht.
 
 ## Codestil, kurz
 

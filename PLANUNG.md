@@ -1,7 +1,7 @@
 # Chat-App — Planung
 
 Modul M321 (Verteilte Systeme / Microservices), Klasse IT3b, Schule Benedict.
-Grundlage: die Skizze `IMG_3379 (1).heic` (Stack + Blockdiagramm), erweitert um die Vorgaben
+Grundlage: die Skizze `docs/skizze-architektur.heic` (Stack + Blockdiagramm), erweitert um die Vorgaben
 Keycloak, docker-compose, internes Docker-Netzwerk.
 
 ---

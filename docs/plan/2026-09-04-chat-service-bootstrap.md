@@ -123,7 +123,7 @@ Danach gleich die schon vorhandenen Dokumente sichern — Planung, Regeln und di
 bisher nirgends versioniert:
 
 ```bash
-git add CLAUDE.md PLANUNG.md docs/ "IMG_3379 (1).heic"
+git add CLAUDE.md PLANUNG.md docs/
 git commit -m "docs: Planung, Codestil-Regeln und Architekturskizze aufnehmen"
 ```
 
