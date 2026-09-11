@@ -6,6 +6,11 @@ target/
 *.iml
 out/
 
+# Eclipse / VS Code (Java-Language-Server legt diese Dateien selbst an)
+.classpath
+.project
+.settings/
+
 # macOS
 .DS_Store
 
