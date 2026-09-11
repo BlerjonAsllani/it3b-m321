@@ -1,5 +1,9 @@
 server:
   port: 8080
+  error:
+    # Ohne diese Zeile schickt Spring Boot unsere deutschen Fehlermeldungen
+    # (z. B. "text darf nicht leer sein") nicht an den Client, sondern nur den Statuscode.
+    include-message: always
 
 spring:
   application:
@@ -14,12 +18,14 @@ spring:
 
   kafka:
     # Einstiegspunkt. Von hier holt sich der Client die echten Broker-Adressen
-    # (siehe Hinweis zu advertised.listeners in Task 2).
+    # (advertised.listeners) - zeigen die auf einen falschen oder unerreichbaren Host,
+    # verbindet sich der Client zwar hierhin, haengt danach aber im Timeout.
     bootstrap-servers: localhost:9092
     producer:
       # Schluessel und Wert gehen beide als Text raus: der Schluessel ist die roomId,
-      # der Wert die Nachricht als JSON-Text. Das JSON erzeugen wir selbst im
-      # MessageService - warum, steht in Task 4, Schritt 3.
+      # der Wert die Nachricht als JSON-Text. Das JSON bauen wir selbst im MessageService,
+      # nicht mit Spring Kafkas JsonSerializer: der schreibt Zeitpunkte als Zahl und haengt
+      # einen Header mit dem Klassennamen des Senders an, den andere Dienste nicht kennen.
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.apache.kafka.common.serialization.StringSerializer
       properties:

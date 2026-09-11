@@ -226,6 +226,10 @@ Datei `chat-service/src/main/resources/application.yml`:
 ```yaml
 server:
   port: 8080
+  error:
+    # Ohne diese Zeile schickt Spring Boot unsere deutschen Fehlermeldungen
+    # (z. B. "text darf nicht leer sein") nicht an den Client, sondern nur den Statuscode.
+    include-message: always
 
 spring:
   application:
@@ -443,8 +447,11 @@ services:
       POSTGRES_USER: chat
       POSTGRES_PASSWORD: chat
     ports:
-      # NUR fuer den Bootstrap veroeffentlicht - siehe Hinweis im Plan.
-      - "5432:5432"
+      # Nur auf localhost veroeffentlicht (127.0.0.1), nicht auf allen Netzwerk-
+      # Schnittstellen: sonst waere die Datenbank (Zugang chat/chat) aus dem ganzen
+      # Schulnetz erreichbar. Veroeffentlicht wird trotzdem, weil der chat-service in
+      # diesem Bootstrap noch auf dem Host laeuft und die Datenbank so erreichen muss.
+      - "127.0.0.1:5432:5432"
     volumes:
       # Alle .sql-Dateien hier drin fuehrt das Postgres-Image beim ERSTEN Start
       # in alphabetischer Reihenfolge aus. Danach nie wieder.
@@ -457,8 +464,9 @@ services:
     image: apache/kafka:4.0.0
     container_name: m321-kafka
     ports:
-      # NUR fuer den Bootstrap veroeffentlicht - siehe Hinweis im Plan.
-      - "9092:9092"
+      # Nur auf localhost veroeffentlicht, aus demselben Grund wie bei Postgres oben:
+      # sonst waere der Broker aus dem ganzen Schulnetz erreichbar.
+      - "127.0.0.1:9092:9092"
     environment:
       # --- KRaft: dieser eine Container ist Broker UND Controller zugleich ---
       KAFKA_NODE_ID: 1
@@ -470,8 +478,10 @@ services:
       KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
 
-      # Welche Adresse der Broker den Clients NENNT. Siehe Warnung unten -
-      # das ist die haeufigste Fehlerquelle bei Kafka in Docker.
+      # Welche Adresse der Broker den Clients NENNT: verbindet sich ein Client zu einer
+      # falschen oder nicht aufloesbaren Adresse, haengt er danach im Timeout, obwohl die
+      # erste Verbindung zum bootstrap-server geklappt hat - die haeufigste Fehlerquelle
+      # bei Kafka in Docker.
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
 
       # Ein einzelner Broker kann nichts replizieren - daher ueberall 1.
@@ -642,12 +652,14 @@ spring:
 
   kafka:
     # Einstiegspunkt. Von hier holt sich der Client die echten Broker-Adressen
-    # (siehe Hinweis zu advertised.listeners in Task 2).
+    # (advertised.listeners) - zeigen die auf einen falschen oder unerreichbaren Host,
+    # verbindet sich der Client zwar hierhin, haengt danach aber im Timeout.
     bootstrap-servers: localhost:9092
     producer:
       # Schluessel und Wert gehen beide als Text raus: der Schluessel ist die roomId,
-      # der Wert die Nachricht als JSON-Text. Das JSON erzeugen wir selbst im
-      # MessageService - warum, steht in Task 4, Schritt 3.
+      # der Wert die Nachricht als JSON-Text. Das JSON bauen wir selbst im MessageService,
+      # nicht mit Spring Kafkas JsonSerializer: der schreibt Zeitpunkte als Zahl und haengt
+      # einen Header mit dem Klassennamen des Senders an, den andere Dienste nicht kennen.
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.apache.kafka.common.serialization.StringSerializer
       properties:
@@ -1064,6 +1076,7 @@ git commit -m "feat(chat-service): GET /api/messages liest den Verlauf, dokument
 - Ändern: `chat-service/src/main/java/ch/benedict/m321/chat/message/MessageService.java`
 - Ändern: `chat-service/src/main/java/ch/benedict/m321/chat/message/MessageController.java`
 - Test: `chat-service/src/test/java/ch/benedict/m321/chat/message/MessageControllerTest.java` (ergänzen)
+- Test: `chat-service/src/test/java/ch/benedict/m321/chat/message/MessageServiceTest.java` (neu)
 
 **Schnittstellen:**
 - Braucht aus Task 3: `Message`, `MessageService`, `MessageController`
@@ -1082,10 +1095,12 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.web.server.ResponseStatusException;
 
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 ```
 
-`any` ist bereits importiert. Dann die drei Testmethoden in die Klasse einfügen:
+`any` ist bereits importiert. Dann die vier Testmethoden in die Klasse einfügen:
 
 ```java
     @Test
@@ -1130,6 +1145,29 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
                 .andExpect(status().isBadRequest());
+
+        // Bei einer abgelehnten Anfrage darf der Service gar nicht erst aufgerufen werden.
+        verify(messageService, never()).sendMessage(any());
+    }
+
+    @Test
+    void sendRejectsTooLongText() throws Exception {
+        // 2001 Zeichen - einer mehr als MAX_TEXT_LENGTH im Controller erlaubt.
+        String zuLangerText = "a".repeat(2001);
+        String body = """
+                {
+                  "roomId": "11111111-1111-1111-1111-111111111111",
+                  "sender": "lernende1",
+                  "text": "%s"
+                }
+                """.formatted(zuLangerText);
+
+        mockMvc.perform(post("/api/messages")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isBadRequest());
+
+        verify(messageService, never()).sendMessage(any());
     }
 
     @Test
@@ -1287,6 +1325,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.kafka.clients.producer.RecordMetadata;
 import org.springframework.http.HttpStatus;
+import org.springframework.kafka.KafkaException;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.support.SendResult;
 import org.springframework.web.server.ResponseStatusException;
@@ -1295,7 +1334,12 @@ import org.springframework.web.server.ResponseStatusException;
 Felder und Konstruktor (ersetzen die bisherige Fassung):
 
 ```java
-    /** So lange warten wir hoechstens auf die Bestaetigung von Kafka. Passt zu max.block.ms. */
+    /**
+     * So lange warten wir hoechstens auf die Bestaetigung von Kafka, NACHDEM send() zurueckgekehrt
+     * ist. Das laeuft NACH einem moeglichen Block innerhalb von send() selbst (bis zu max.block.ms,
+     * siehe application.yml) - im ungluecklichsten Fall warten wir also beide Zeitbudgets
+     * nacheinander ab, zusammen rund 10 Sekunden.
+     */
     private static final int SEND_TIMEOUT_SECONDS = 5;
 
     private final KafkaTemplate<String, String> kafkaTemplate;
@@ -1303,8 +1347,9 @@ Felder und Konstruktor (ersetzen die bisherige Fassung):
     private final MessageRepository messageRepository;
 
     /**
-     * Den ObjectMapper reicht Spring Boot herein. Er ist so eingestellt, dass Zeitpunkte
-     * als lesbarer Text geschrieben werden - siehe Hinweis in Schritt 3.
+     * Den ObjectMapper reicht Spring Boot herein. Dessen Jackson-Autokonfiguration schreibt
+     * Zeitpunkte serienmaessig als lesbaren ISO-Text (z. B. "2026-09-04T08:05:00Z") statt als
+     * Zahl - anders als der JsonSerializer von Spring Kafka mit seinem eigenen ObjectMapper.
      */
     public MessageService(KafkaTemplate<String, String> kafkaTemplate,
                           ObjectMapper objectMapper,
@@ -1347,14 +1392,9 @@ Neue Methode (anfügen):
         String partitionKey = incoming.roomId().toString();
         String json = toJson(message);
 
-        // send() kehrt sofort zurueck und liefert nur ein "Versprechen" (CompletableFuture).
-        // Der eigentliche Versand laeuft im Hintergrund, in einem Thread des Kafka-Clients.
-        CompletableFuture<SendResult<String, String>> pending =
-                kafkaTemplate.send(KafkaConfiguration.TOPIC_NAME, partitionKey, json);
-
-        // Wir warten trotzdem auf die Bestaetigung. Sonst meldeten wir dem Client
+        // Wir warten auf die Bestaetigung von Kafka. Sonst meldeten wir dem Client
         // "202 angenommen" fuer eine Nachricht, die vielleicht nie angekommen ist.
-        SendResult<String, String> result = waitForKafka(pending, id);
+        SendResult<String, String> result = sendAndWaitForKafka(partitionKey, json, id);
 
         // Kafka meldet zurueck, WO die Nachricht gelandet ist. Im Log sieht man so,
         // dass alle Nachrichten eines Raums immer in derselben Partition landen.
@@ -1365,15 +1405,27 @@ Neue Methode (anfügen):
     }
 
     /**
-     * Wartet hoechstens SEND_TIMEOUT_SECONDS auf die Bestaetigung von Kafka. Kommt sie
-     * nicht, antwortet der chat-service mit 503: der Chat nimmt sichtbar nichts an,
-     * statt still Nachrichten zu verlieren (PLANUNG.md, Abschnitt 2.4).
+     * Sendet die Nachricht an Kafka und wartet hoechstens SEND_TIMEOUT_SECONDS auf die
+     * Bestaetigung. Scheitert das Senden oder bleibt die Bestaetigung aus, antwortet der
+     * chat-service mit 503: der Chat nimmt sichtbar nichts an, statt still Nachrichten zu
+     * verlieren (PLANUNG.md, Abschnitt 2.4).
      */
-    private SendResult<String, String> waitForKafka(
-            CompletableFuture<SendResult<String, String>> pending, UUID id) {
+    private SendResult<String, String> sendAndWaitForKafka(String partitionKey, String json, UUID id) {
         try {
+            // send() kehrt in aller Regel SOFORT zurueck und liefert nur ein "Versprechen"
+            // (CompletableFuture); der eigentliche Versand laeuft im Hintergrund, in einem
+            // Thread des Kafka-Clients. Kennt der Producer die Partitionen des Topics aber
+            // noch nicht (z. B. beim allerersten Senden nach dem Start), fragt er zuerst den
+            // Broker und blockiert dabei bis zu max.block.ms - und kann dann DIREKT HIER, auf
+            // dieser Zeile, mit einer Ausnahme scheitern, statt ein Versprechen zurueckzugeben.
+            CompletableFuture<SendResult<String, String>> pending =
+                    kafkaTemplate.send(KafkaConfiguration.TOPIC_NAME, partitionKey, json);
             return pending.get(SEND_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-        } catch (ExecutionException | TimeoutException failure) {
+        } catch (KafkaException | ExecutionException | TimeoutException failure) {
+            // Es gibt zwei Klassen namens KafkaException: org.apache.kafka.common.KafkaException
+            // und org.springframework.kafka.KafkaException. KafkaTemplate wirft die von SPRING,
+            // wenn send() wie oben beschrieben sofort scheitert - genau die fangen wir hier ab,
+            // zusammen mit einer ausbleibenden Bestaetigung (ExecutionException/TimeoutException).
             log.warn("Nachricht {} wurde von Kafka nicht bestaetigt: {}", id, failure.toString());
             throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
                     "Nachricht konnte nicht weitergegeben werden - bitte spaeter erneut senden");
@@ -1402,12 +1454,20 @@ Neue Methode (anfügen):
     }
 ```
 
-> **Warum wir auf `send(...)` warten.** `send` selbst wartet nicht: es gibt ein
-> `CompletableFuture` zurück, und ein Fehler beim Senden taucht **nicht** als Exception an dieser
-> Zeile auf. Ohne das Warten würde der Client bei ausgefallenem Broker trotzdem `202` bekommen —
-> und die Nachricht wäre still verloren. Genau das schliesst `PLANUNG.md` (Abschnitt 2.4) aus.
-> Deshalb wartet `waitForKafka` höchstens 5 Sekunden und antwortet sonst mit `503`. Der Preis:
-> jede Sendeanfrage dauert so lange, bis Kafka bestätigt hat — normalerweise wenige Millisekunden.
+> **Warum wir auf `send(...)` warten.** `send` selbst wartet in aller Regel nicht: es gibt sofort
+> ein `CompletableFuture` zurück, und der eigentliche Versand läuft im Hintergrund. Kennt der
+> Producer die Partitionen des Topics aber noch nicht — zum Beispiel beim allerersten Senden nach
+> dem Start, oder wenn `metadata.max.idle.ms` (Standard 5 Minuten) ohne weiteres Senden verstrichen
+> ist —, fragt er zuerst synchron beim Broker nach und kann dabei bis zu `max.block.ms` blockieren
+> und **direkt an dieser Zeile** mit einer `KafkaException` scheitern, statt ein Versprechen
+> zurückzugeben. `sendAndWaitForKafka` fängt deshalb sowohl dieses sofortige Scheitern als auch
+> eine erst später über das `CompletableFuture` gemeldete Ausnahme ab. Ohne das würde der Client
+> bei ausgefallenem Broker sonst entweder still `202` bekommen (die Nachricht wäre verloren) oder,
+> im Fall der `KafkaException`, ein nacktes `500` ohne Erklärung sehen — beides schliesst
+> `PLANUNG.md` (Abschnitt 2.4) aus. Der Preis: jede Sendeanfrage dauert so lange, bis Kafka
+> bestätigt hat, oder im schlimmsten Fall so lange, bis beide Zeitbudgets nacheinander abgelaufen
+> sind (`max.block.ms` und `SEND_TIMEOUT_SECONDS`, zusammen rund 10 Sekunden) — normalerweise sind
+> es nur wenige Millisekunden.
 >
 > **Ehrlich benannt: `503` heisst «nicht bestätigt», nicht «sicher verloren».** Der Kafka-Client
 > versucht es im Hintergrund weiter. Kommt die Nachricht nach unserem Zeitlimit doch noch an und
@@ -1420,7 +1480,146 @@ Neue Methode (anfügen):
 > **Ausnahme im Stil.** Der Service wirft hier eine `ResponseStatusException` — eigentlich eine
 > Klasse aus der Webschicht. Das ist eine bewusste Abkürzung, siehe «Entscheide» unten.
 
-- [ ] **Schritt 6: Den Controller um `POST` erweitern**
+- [ ] **Schritt 6: `MessageService` allein mit Mockito prüfen**
+
+`MessageControllerTest` prüft nur, dass der Controller den Service ruft — der Service selbst wird
+dabei durch eine Attrappe ersetzt und läuft nie wirklich. Ob `sendMessage` wirklich das richtige
+JSON mit dem richtigen Schlüssel schickt, und ob es auf **beide** Arten reagiert, wie Kafka
+scheitern kann (sofort mit einer Ausnahme, oder erst später über das `CompletableFuture`), prüft
+erst dieser Test — ganz ohne Spring-Kontext und ohne Docker.
+
+Datei `chat-service/src/test/java/ch/benedict/m321/chat/message/MessageServiceTest.java`:
+
+```java
+package ch.benedict.m321.chat.message;
+
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import org.apache.kafka.clients.producer.RecordMetadata;
+import org.apache.kafka.common.TopicPartition;
+import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.converter.json.Jackson2ObjectMapperBuilder;
+import org.springframework.kafka.KafkaException;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.support.SendResult;
+import org.springframework.web.server.ResponseStatusException;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+/**
+ * Testet MessageService allein, ohne Spring-Kontext und ohne Docker: KafkaTemplate und
+ * MessageRepository sind Attrappen (Mockito), der ObjectMapper ist echt und genauso
+ * eingestellt wie der, den Spring Boot dem Service normalerweise hereinreicht.
+ */
+class MessageServiceTest {
+
+    private static final UUID ROOM_ID = UUID.fromString("11111111-1111-1111-1111-111111111111");
+
+    // .json().build() allein reicht NICHT: ohne Spring-Kontext bleibt
+    // WRITE_DATES_AS_TIMESTAMPS auf dem Jackson-Standard (an) - genau das schaltet erst
+    // Spring Boots JacksonAutoConfiguration ab. Das wird hier von Hand nachgestellt, damit
+    // dieser ObjectMapper wie der echte, von Spring Boot injizierte, ISO-Text schreibt.
+    private final ObjectMapper objectMapper = Jackson2ObjectMapperBuilder.json()
+            .featuresToDisable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
+            .build();
+
+    @SuppressWarnings("unchecked")
+    private final KafkaTemplate<String, String> kafkaTemplate = mock(KafkaTemplate.class);
+
+    private final MessageRepository messageRepository = mock(MessageRepository.class);
+
+    private final MessageService messageService =
+            new MessageService(kafkaTemplate, objectMapper, messageRepository);
+
+    /**
+     * Prueft, dass eine gesendete Nachricht mit der roomId als Kafka-Schluessel ankommt und
+     * dass der Wert JSON mit allen Feldern ist, inklusive sentAt als lesbarem ISO-Zeitstempel.
+     */
+    @Test
+    void sendMessageWritesJsonWithRoomIdAsKey() throws Exception {
+        RecordMetadata metadata = new RecordMetadata(
+                new TopicPartition("chat.messages", 0), 0L, 0, 0L, 0, 0);
+        SendResult<String, String> result = new SendResult<>(null, metadata);
+        when(kafkaTemplate.send(anyString(), anyString(), anyString()))
+                .thenReturn(CompletableFuture.completedFuture(result));
+
+        NewMessage incoming = new NewMessage(ROOM_ID, "lernende1", "Hallo zusammen");
+        messageService.sendMessage(incoming);
+
+        // Wir fangen die drei Argumente von send() ab, um sie einzeln zu pruefen.
+        ArgumentCaptor<String> topicCaptor = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<String> keyCaptor = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<String> valueCaptor = ArgumentCaptor.forClass(String.class);
+        verify(kafkaTemplate).send(topicCaptor.capture(), keyCaptor.capture(), valueCaptor.capture());
+
+        assertEquals("chat.messages", topicCaptor.getValue());
+        assertEquals(ROOM_ID.toString(), keyCaptor.getValue());
+
+        JsonNode json = objectMapper.readTree(valueCaptor.getValue());
+        assertTrue(json.has("roomId"));
+        assertTrue(json.has("sender"));
+        assertTrue(json.has("text"));
+        assertTrue(json.has("id"));
+        assertTrue(json.get("sentAt").isTextual());
+        assertTrue(json.get("sentAt").asText().endsWith("Z"));
+    }
+
+    /**
+     * Prueft die 503-Antwort fuer den Fall, dass Kafka das Scheitern erst SPAETER ueber das
+     * CompletableFuture meldet - send() selbst liefert normal zurueck.
+     */
+    @Test
+    void sendMessageAnswers503WhenKafkaFailsLater() {
+        when(kafkaTemplate.send(anyString(), anyString(), anyString()))
+                .thenReturn(CompletableFuture.failedFuture(new RuntimeException("Broker weg")));
+
+        NewMessage incoming = new NewMessage(ROOM_ID, "lernende1", "Kommt das an?");
+
+        ResponseStatusException exception = assertThrows(ResponseStatusException.class,
+                () -> messageService.sendMessage(incoming));
+        assertEquals(HttpStatus.SERVICE_UNAVAILABLE, exception.getStatusCode());
+    }
+
+    /**
+     * Prueft die 503-Antwort fuer den Fall, dass send() SOFORT eine KafkaException wirft (z. B.
+     * weil der Producer noch keine Metadaten fuer das Topic hat) - der Service muss das genauso
+     * abfangen wie ein spaeteres Scheitern, statt die Ausnahme unbehandelt bis zum Controller
+     * durchzulassen (dort wuerde daraus ein HTTP 500 ohne WARN-Log).
+     */
+    @Test
+    void sendMessageAnswers503WhenSendFailsImmediately() {
+        when(kafkaTemplate.send(anyString(), anyString(), anyString()))
+                .thenThrow(new KafkaException("Send failed"));
+
+        NewMessage incoming = new NewMessage(ROOM_ID, "lernende1", "Kommt das an?");
+
+        ResponseStatusException exception = assertThrows(ResponseStatusException.class,
+                () -> messageService.sendMessage(incoming));
+        assertEquals(HttpStatus.SERVICE_UNAVAILABLE, exception.getStatusCode());
+    }
+}
+```
+
+```bash
+cd chat-service
+mvn test -Dtest=MessageServiceTest
+```
+
+Erwartet: **BESTANDEN.** `Tests run: 3, Failures: 0, Errors: 0`.
+
+- [ ] **Schritt 7: Den Controller um `POST` erweitern**
 
 In `MessageController.java` anfügen. Zusätzliche Importe:
 
@@ -1428,6 +1627,19 @@ In `MessageController.java` anfügen. Zusätzliche Importe:
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+```
+
+Zusätzliche Felder, direkt unter `MAX_LIMIT` einfügen:
+
+```java
+    /** Obergrenze fuer "sender". Die Spalte in der Datenbank ist VARCHAR(100). */
+    private static final int MAX_SENDER_LENGTH = 100;
+
+    /**
+     * Obergrenze fuer "text". Ohne diese Grenze koennte ein riesiger Text den Weg bis zu
+     * Kafka schaffen und dort erst als max.request.size scheitern - mit einem irrefuehrenden 503.
+     */
+    private static final int MAX_TEXT_LENGTH = 2000;
 ```
 
 Neue Methode:
@@ -1447,7 +1659,7 @@ Neue Methode:
                         + "hat. Gespeichert wird die Nachricht kurz danach vom batch-service - sie "
                         + "erscheint also erst mit kleiner Verzoegerung im Verlauf.")
     @ApiResponse(responseCode = "202", description = "Nachricht angenommen und auf das Topic geschrieben")
-    @ApiResponse(responseCode = "400", description = "roomId fehlt oder der Text ist leer")
+    @ApiResponse(responseCode = "400", description = "roomId fehlt, sender fehlt oder ist zu lang, Text leer oder laenger als 2000 Zeichen")
     @ApiResponse(responseCode = "503", description = "Kafka hat nicht rechtzeitig bestaetigt - bitte spaeter erneut senden")
     @PostMapping
     public ResponseEntity<Message> send(@RequestBody NewMessage incoming) {
@@ -1463,9 +1675,19 @@ Neue Methode:
             log.warn("Sendeanfrage ohne sender fuer Raum {} abgelehnt", incoming.roomId());
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "sender fehlt");
         }
+        if (incoming.sender().length() > MAX_SENDER_LENGTH) {
+            log.warn("Sendeanfrage mit zu langem sender fuer Raum {} abgelehnt", incoming.roomId());
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "sender darf hoechstens " + MAX_SENDER_LENGTH + " Zeichen lang sein");
+        }
         if (incoming.text() == null || incoming.text().isBlank()) {
             log.warn("Sendeanfrage mit leerem Text fuer Raum {} abgelehnt", incoming.roomId());
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "text darf nicht leer sein");
+        }
+        if (incoming.text().length() > MAX_TEXT_LENGTH) {
+            log.warn("Sendeanfrage mit zu langem Text fuer Raum {} abgelehnt", incoming.roomId());
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "text darf hoechstens " + MAX_TEXT_LENGTH + " Zeichen lang sein");
         }
 
         Message published = messageService.sendMessage(incoming);
@@ -1481,19 +1703,19 @@ Neue Methode:
 > der Dokumentation. Gebraucht wird hier die **von Spring**. Importiert man versehentlich die
 > andere, kompiliert alles, aber der Parameter bleibt zur Laufzeit `null`.
 
-- [ ] **Schritt 7: Tests laufen lassen — sie müssen bestehen**
+- [ ] **Schritt 8: Tests laufen lassen — sie müssen bestehen**
 
 ```bash
 mvn test
 ```
 
-Erwartet: **BESTANDEN.** `Tests run: 5, Failures: 0, Errors: 0`.
+Erwartet: **BESTANDEN.** `Tests run: 9, Failures: 0, Errors: 0`.
 
 > **Docker muss laufen.** Seit Task 2 fährt `ChatServiceApplicationTest` die ganze
 > Anwendung hoch und braucht dafür Datenbank und Broker. Vorher im
 > Projektwurzelverzeichnis `docker compose up -d` ausführen.
 
-- [ ] **Schritt 8: Von Hand prüfen — die Nachricht muss wirklich im Broker landen**
+- [ ] **Schritt 9: Von Hand prüfen — die Nachricht muss wirklich im Broker landen**
 
 Ein grüner Test beweist nur, dass der Controller den Service ruft. Ob Kafka die Nachricht
 bekommt, sieht man nur im Broker.
@@ -1553,7 +1775,7 @@ Erwartet ist ausserdem: `GET /api/messages` liefert diese Nachricht **nicht** �
 in der Datenbank. Genau das ist der Beweis, dass Senden und Speichern getrennt sind. Der
 `batch-service` schliesst diese Lücke im nächsten Plan.
 
-- [ ] **Schritt 9: Commit**
+- [ ] **Schritt 10: Commit**
 
 ```bash
 cd it3b-m321
@@ -1565,7 +1787,7 @@ git commit -m "feat(chat-service): POST /api/messages schreibt auf das Kafka-Top
 
 ## Fertig, wenn …
 
-- [ ] `mvn test` im Verzeichnis `chat-service` ist grün (5 Tests)
+- [ ] `mvn test` im Verzeichnis `chat-service` ist grün (9 Tests)
 - [ ] `docker compose up -d` bringt PostgreSQL und Kafka hoch; `/actuator/health` meldet `db` als
       `UP`, und `kafka-topics.sh --list` antwortet ohne Timeout
 - [ ] <http://localhost:8080/swagger-ui.html> zeigt den Bereich «Nachrichten» mit **beiden** Endpunkten,
@@ -1604,12 +1826,12 @@ gelöst oder der Fehler steht sofort da. Der Rest des Dienstes bleibt unverände
 
 | Thema | Wo es im Code steht |
 |---|---|
-| **Topic und Partitionen** — ein Log, der auch ohne Leser aufbewahrt; jede Consumer-Gruppe bekommt eine eigene Kopie | `KafkaConfiguration`, Schritt 8 in Task 4 |
+| **Topic und Partitionen** — ein Log, der auch ohne Leser aufbewahrt; jede Consumer-Gruppe bekommt eine eigene Kopie | `KafkaConfiguration`, Schritt 9 in Task 4 |
 | **Schlüssel bestimmt die Partition** — gleicher Schlüssel, gleiche Partition, garantierte Reihenfolge | `MessageService.sendMessage` (`roomId` als Schlüssel) |
 | **`advertised.listeners`** — der Broker nennt dem Client die Adresse, unter der er erreichbar ist | `docker-compose.yml`, Hinweis in Task 2 |
 | **Publizieren statt Schreiben** — warum der Absender-Dienst die Datenbank nicht anfasst | `MessageService.sendMessage` |
 | **202 statt 201** — angenommen ist nicht gespeichert | `MessageController.send` |
-| **Asynchron senden, trotzdem bestätigen lassen** — `CompletableFuture`, Zeitlimit, `503` | `MessageService.waitForKafka` |
+| **Asynchron senden, trotzdem bestätigen lassen** — `CompletableFuture`, Zeitlimit, `503`, und zwei Wege, wie das Senden scheitern kann (sofort oder erst später) | `MessageService.sendAndWaitForKafka` |
 | **ID und Zeitstempel beim Sender** — Voraussetzung fürs spätere Bündeln | `MessageService.sendMessage` |
 | **Schichten** — Controller kennt nur den Service, der Service nur das Repository | alle drei Klassen im Paket `message` |
 | **Prepared Statements** — Werte als `?`, nie in den SQL-String geklebt | `MessageRepository.findLatest` |
@@ -1631,10 +1853,10 @@ gelöst oder der Fehler steht sofort da. Der Rest des Dienstes bleibt unverände
 | **SQL-Init-Skripte statt Flyway** | Das Postgres-Image führt `/docker-entrypoint-initdb.d` von sich aus aus. Kein Werkzeug, kein Namensschema, kein zusätzliches Konzept. | Bei Schema-Änderungen `docker compose down -v` nötig. Sobald das nervt, ist Flyway die Antwort |
 | **`TIMESTAMPTZ` statt `TIMESTAMP`** | Ohne Zeitzone geht die Zone beim Speichern verloren, und `Instant` ist genau ein Zeitpunkt in UTC. | — (`PLANUNG.md` ist bereits nachgezogen) |
 | **JSON als Text mit `StringSerializer` statt `JsonSerializer`** | Der `JsonSerializer` von Spring Kafka schreibt Zeitpunkte als Zahl und hängt einen `__TypeId__`-Header mit dem Klassennamen des Senders an, an dem der `batch-service` scheitern würde. JSON-Text ist das neutrale Format zwischen Diensten. | `JsonSerializer` mit dem ObjectMapper von Spring Boot und `spring.json.add.type.headers: false` — geht, braucht aber eine eigene `ProducerFactory`-Bean |
-| **Auf die Bestätigung von Kafka warten, sonst `503`** | Ohne Warten bekäme der Client bei ausgefallenem Broker `202`, und die Nachricht wäre still verloren — genau das schliesst `PLANUNG.md` 2.4 aus. | Nicht warten und nur loggen (`whenComplete`) — schneller, aber der Client erfährt nie von einem Verlust |
+| **Auf die Bestätigung von Kafka warten, sonst `503`** | Ohne Warten bekäme der Client bei ausgefallenem Broker `202`, und die Nachricht wäre still verloren — genau das schliesst `PLANUNG.md` 2.4 aus. Gefangen werden dabei **beide** Arten des Scheiterns: sofort als `KafkaException` direkt bei `send(...)`, oder erst später über das `CompletableFuture` (`ExecutionException`/`TimeoutException`) — sonst würde die sofortige Variante als `500` beim Client landen statt als `503`. | Nicht warten und nur loggen (`whenComplete`) — schneller, aber der Client erfährt nie von einem Verlust |
 | **`ResponseStatusException` im Service statt in der Webschicht** | Eine Zeile statt einer eigenen Exception-Klasse und eines `@ExceptionHandler`. Für den Bootstrap reicht das. | Eigene `BrokerUnavailableException` im Service, Umwandlung in `503` per `@ExceptionHandler` im Controller — sauberer getrennt, ein Konzept mehr |
 | **`sender` im Request-Body** | Es gibt noch kein Token. Das Feld ist in Swagger ausdrücklich als Platzhalter markiert. | Fällt weg, sobald Keycloak steht — der Name kommt dann aus `preferred_username` |
-| **Tests nur mit `MockMvc`** | Läuft ohne Docker und prüft genau das, was die API verspricht. | Repository und Broker werden hier von Hand geprüft (Schritte 8). Echte Integrationstests brauchen Testcontainers — eigener Plan |
+| **Tests nur mit `MockMvc`** | Läuft ohne Docker und prüft genau das, was die API verspricht. Für die Kafka-Fehlerfaelle im Service kommt ein reiner Mockito-Unit-Test dazu (`MessageServiceTest`), ganz ohne Spring-Kontext. | Repository und Broker werden hier von Hand geprüft (Schritt 9). Echte Integrationstests brauchen Testcontainers — eigener Plan |
 | **Kein Eltern-POM** | Jeder Dienst ist eigenständig baubar — das ist das Modulthema. | Bei vier Diensten wird die Wiederholung lästig; dann ein Eltern-POM nachziehen |
 
 ---

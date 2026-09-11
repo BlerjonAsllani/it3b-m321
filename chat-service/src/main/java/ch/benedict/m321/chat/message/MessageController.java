@@ -34,6 +34,15 @@ public class MessageController {
     /** Obergrenze fuer "limit". Schuetzt die Datenbank vor einer Abfrage ueber Millionen Zeilen. */
     private static final int MAX_LIMIT = 100;
 
+    /** Obergrenze fuer "sender". Die Spalte in der Datenbank ist VARCHAR(100). */
+    private static final int MAX_SENDER_LENGTH = 100;
+
+    /**
+     * Obergrenze fuer "text". Ohne diese Grenze koennte ein riesiger Text den Weg bis zu
+     * Kafka schaffen und dort erst als max.request.size scheitern - mit einem irrefuehrenden 503.
+     */
+    private static final int MAX_TEXT_LENGTH = 2000;
+
     private final MessageService messageService;
 
     public MessageController(MessageService messageService) {
@@ -88,7 +97,7 @@ public class MessageController {
                         + "hat. Gespeichert wird die Nachricht kurz danach vom batch-service - sie "
                         + "erscheint also erst mit kleiner Verzoegerung im Verlauf.")
     @ApiResponse(responseCode = "202", description = "Nachricht angenommen und auf das Topic geschrieben")
-    @ApiResponse(responseCode = "400", description = "roomId fehlt oder der Text ist leer")
+    @ApiResponse(responseCode = "400", description = "roomId fehlt, sender fehlt oder ist zu lang, Text leer oder laenger als 2000 Zeichen")
     @ApiResponse(responseCode = "503", description = "Kafka hat nicht rechtzeitig bestaetigt - bitte spaeter erneut senden")
     @PostMapping
     public ResponseEntity<Message> send(@RequestBody NewMessage incoming) {
@@ -104,9 +113,19 @@ public class MessageController {
             log.warn("Sendeanfrage ohne sender fuer Raum {} abgelehnt", incoming.roomId());
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "sender fehlt");
         }
+        if (incoming.sender().length() > MAX_SENDER_LENGTH) {
+            log.warn("Sendeanfrage mit zu langem sender fuer Raum {} abgelehnt", incoming.roomId());
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "sender darf hoechstens " + MAX_SENDER_LENGTH + " Zeichen lang sein");
+        }
         if (incoming.text() == null || incoming.text().isBlank()) {
             log.warn("Sendeanfrage mit leerem Text fuer Raum {} abgelehnt", incoming.roomId());
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "text darf nicht leer sein");
+        }
+        if (incoming.text().length() > MAX_TEXT_LENGTH) {
+            log.warn("Sendeanfrage mit zu langem Text fuer Raum {} abgelehnt", incoming.roomId());
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "text darf hoechstens " + MAX_TEXT_LENGTH + " Zeichen lang sein");
         }
 
         Message published = messageService.sendMessage(incoming);

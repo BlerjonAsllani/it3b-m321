@@ -10,8 +10,11 @@ services:
       POSTGRES_USER: chat
       POSTGRES_PASSWORD: chat
     ports:
-      # NUR fuer den Bootstrap veroeffentlicht - siehe Hinweis im Plan.
-      - "5432:5432"
+      # Nur auf localhost veroeffentlicht (127.0.0.1), nicht auf allen Netzwerk-
+      # Schnittstellen: sonst waere die Datenbank (Zugang chat/chat) aus dem ganzen
+      # Schulnetz erreichbar. Veroeffentlicht wird trotzdem, weil der chat-service in
+      # diesem Bootstrap noch auf dem Host laeuft und die Datenbank so erreichen muss.
+      - "127.0.0.1:5432:5432"
     volumes:
       # Alle .sql-Dateien hier drin fuehrt das Postgres-Image beim ERSTEN Start
       # in alphabetischer Reihenfolge aus. Danach nie wieder.
@@ -24,8 +27,9 @@ services:
     image: apache/kafka:4.0.0
     container_name: m321-kafka
     ports:
-      # NUR fuer den Bootstrap veroeffentlicht - siehe Hinweis im Plan.
-      - "9092:9092"
+      # Nur auf localhost veroeffentlicht, aus demselben Grund wie bei Postgres oben:
+      # sonst waere der Broker aus dem ganzen Schulnetz erreichbar.
+      - "127.0.0.1:9092:9092"
     environment:
       # --- KRaft: dieser eine Container ist Broker UND Controller zugleich ---
       KAFKA_NODE_ID: 1
@@ -37,8 +41,10 @@ services:
       KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
 
-      # Welche Adresse der Broker den Clients NENNT. Siehe Warnung unten -
-      # das ist die haeufigste Fehlerquelle bei Kafka in Docker.
+      # Welche Adresse der Broker den Clients NENNT: verbindet sich ein Client zu einer
+      # falschen oder nicht aufloesbaren Adresse, haengt er danach im Timeout, obwohl die
+      # erste Verbindung zum bootstrap-server geklappt hat - die haeufigste Fehlerquelle
+      # bei Kafka in Docker.
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
 
       # Ein einzelner Broker kann nichts replizieren - daher ueberall 1.

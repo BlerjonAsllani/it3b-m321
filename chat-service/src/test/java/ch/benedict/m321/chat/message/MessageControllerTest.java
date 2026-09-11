@@ -15,6 +15,8 @@ import org.springframework.web.server.ResponseStatusException;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -96,6 +98,29 @@ class MessageControllerTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
                 .andExpect(status().isBadRequest());
+
+        // Bei einer abgelehnten Anfrage darf der Service gar nicht erst aufgerufen werden.
+        verify(messageService, never()).sendMessage(any());
+    }
+
+    @Test
+    void sendRejectsTooLongText() throws Exception {
+        // 2001 Zeichen - einer mehr als MAX_TEXT_LENGTH im Controller erlaubt.
+        String zuLangerText = "a".repeat(2001);
+        String body = """
+                {
+                  "roomId": "11111111-1111-1111-1111-111111111111",
+                  "sender": "lernende1",
+                  "text": "%s"
+                }
+                """.formatted(zuLangerText);
+
+        mockMvc.perform(post("/api/messages")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isBadRequest());
+
+        verify(messageService, never()).sendMessage(any());
     }
 
     @Test

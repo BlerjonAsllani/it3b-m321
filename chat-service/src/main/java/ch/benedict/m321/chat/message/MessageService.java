@@ -15,6 +15,7 @@ import org.apache.kafka.clients.producer.RecordMetadata;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
+import org.springframework.kafka.KafkaException;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.support.SendResult;
 import org.springframework.stereotype.Service;
@@ -30,7 +31,12 @@ public class MessageService {
 
     private static final Logger log = LoggerFactory.getLogger(MessageService.class);
 
-    /** So lange warten wir hoechstens auf die Bestaetigung von Kafka. Passt zu max.block.ms. */
+    /**
+     * So lange warten wir hoechstens auf die Bestaetigung von Kafka, NACHDEM send() zurueckgekehrt
+     * ist. Das laeuft NACH einem moeglichen Block innerhalb von send() selbst (bis zu max.block.ms,
+     * siehe application.yml) - im ungluecklichsten Fall warten wir also beide Zeitbudgets
+     * nacheinander ab, zusammen rund 10 Sekunden.
+     */
     private static final int SEND_TIMEOUT_SECONDS = 5;
 
     private final KafkaTemplate<String, String> kafkaTemplate;
@@ -38,8 +44,9 @@ public class MessageService {
     private final MessageRepository messageRepository;
 
     /**
-     * Den ObjectMapper reicht Spring Boot herein. Er ist so eingestellt, dass Zeitpunkte
-     * als lesbarer Text geschrieben werden - siehe Hinweis in Schritt 3.
+     * Den ObjectMapper reicht Spring Boot herein. Dessen Jackson-Autokonfiguration schreibt
+     * Zeitpunkte serienmaessig als lesbaren ISO-Text (z. B. "2026-09-04T08:05:00Z") statt als
+     * Zahl - anders als der JsonSerializer von Spring Kafka mit seinem eigenen ObjectMapper.
      */
     public MessageService(KafkaTemplate<String, String> kafkaTemplate,
                           ObjectMapper objectMapper,
@@ -86,14 +93,9 @@ public class MessageService {
         String partitionKey = incoming.roomId().toString();
         String json = toJson(message);
 
-        // send() kehrt sofort zurueck und liefert nur ein "Versprechen" (CompletableFuture).
-        // Der eigentliche Versand laeuft im Hintergrund, in einem Thread des Kafka-Clients.
-        CompletableFuture<SendResult<String, String>> pending =
-                kafkaTemplate.send(KafkaConfiguration.TOPIC_NAME, partitionKey, json);
-
-        // Wir warten trotzdem auf die Bestaetigung. Sonst meldeten wir dem Client
+        // Wir warten auf die Bestaetigung von Kafka. Sonst meldeten wir dem Client
         // "202 angenommen" fuer eine Nachricht, die vielleicht nie angekommen ist.
-        SendResult<String, String> result = waitForKafka(pending, id);
+        SendResult<String, String> result = sendAndWaitForKafka(partitionKey, json, id);
 
         // Kafka meldet zurueck, WO die Nachricht gelandet ist. Im Log sieht man so,
         // dass alle Nachrichten eines Raums immer in derselben Partition landen.
@@ -104,15 +106,27 @@ public class MessageService {
     }
 
     /**
-     * Wartet hoechstens SEND_TIMEOUT_SECONDS auf die Bestaetigung von Kafka. Kommt sie
-     * nicht, antwortet der chat-service mit 503: der Chat nimmt sichtbar nichts an,
-     * statt still Nachrichten zu verlieren (PLANUNG.md, Abschnitt 2.4).
+     * Sendet die Nachricht an Kafka und wartet hoechstens SEND_TIMEOUT_SECONDS auf die
+     * Bestaetigung. Scheitert das Senden oder bleibt die Bestaetigung aus, antwortet der
+     * chat-service mit 503: der Chat nimmt sichtbar nichts an, statt still Nachrichten zu
+     * verlieren (PLANUNG.md, Abschnitt 2.4).
      */
-    private SendResult<String, String> waitForKafka(
-            CompletableFuture<SendResult<String, String>> pending, UUID id) {
+    private SendResult<String, String> sendAndWaitForKafka(String partitionKey, String json, UUID id) {
         try {
+            // send() kehrt in aller Regel SOFORT zurueck und liefert nur ein "Versprechen"
+            // (CompletableFuture); der eigentliche Versand laeuft im Hintergrund, in einem
+            // Thread des Kafka-Clients. Kennt der Producer die Partitionen des Topics aber
+            // noch nicht (z. B. beim allerersten Senden nach dem Start), fragt er zuerst den
+            // Broker und blockiert dabei bis zu max.block.ms - und kann dann DIREKT HIER, auf
+            // dieser Zeile, mit einer Ausnahme scheitern, statt ein Versprechen zurueckzugeben.
+            CompletableFuture<SendResult<String, String>> pending =
+                    kafkaTemplate.send(KafkaConfiguration.TOPIC_NAME, partitionKey, json);
             return pending.get(SEND_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-        } catch (ExecutionException | TimeoutException failure) {
+        } catch (KafkaException | ExecutionException | TimeoutException failure) {
+            // Es gibt zwei Klassen namens KafkaException: org.apache.kafka.common.KafkaException
+            // und org.springframework.kafka.KafkaException. KafkaTemplate wirft die von SPRING,
+            // wenn send() wie oben beschrieben sofort scheitert - genau die fangen wir hier ab,
+            // zusammen mit einer ausbleibenden Bestaetigung (ExecutionException/TimeoutException).
             log.warn("Nachricht {} wurde von Kafka nicht bestaetigt: {}", id, failure.toString());
             throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
                     "Nachricht konnte nicht weitergegeben werden - bitte spaeter erneut senden");
