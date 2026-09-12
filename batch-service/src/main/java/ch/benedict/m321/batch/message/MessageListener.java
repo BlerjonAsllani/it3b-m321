@@ -1,7 +1,12 @@
 package ch.benedict.m321.batch.message;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import ch.benedict.m321.batch.kafka.KafkaConfiguration;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.support.Acknowledgment;
@@ -14,6 +19,8 @@ import org.springframework.stereotype.Component;
  */
 @Component
 public class MessageListener {
+
+    private static final Logger log = LoggerFactory.getLogger(MessageListener.class);
 
     private final MessageParser messageParser;
     private final MessageWriter messageWriter;
@@ -29,32 +36,74 @@ public class MessageListener {
     }
 
     /**
-     * Stufe 1: nimmt jede Nachricht einzeln vom Topic und schreibt sie einzeln. Bestaetigt wird
-     * erst, wenn die Nachricht gespeichert oder auf dem Dead-Letter-Topic abgelegt ist.
+     * Stufe 2: nimmt bis zu 500 Nachrichten auf einmal vom Topic und schreibt sie mit einem
+     * einzigen batchUpdate. Bestaetigt wird erst, wenn jede Nachricht des Pakets entweder
+     * gespeichert oder auf dem Dead-Letter-Topic abgelegt ist.
      */
-    @KafkaListener(topics = KafkaConfiguration.TOPIC_NAME, groupId = KafkaConfiguration.GROUP_ID)
-    public void onMessage(ConsumerRecord<String, String> record, Acknowledgment acknowledgment) {
-        ChatMessage message;
-        try {
-            message = messageParser.parse(record.value());
-        } catch (InvalidMessageException broken) {
-            // Klasse 1: kaputte Nachricht. Wird nie speicherbar - also ablegen und bestaetigen.
-            deadLetterPublisher.publish(record, broken.getMessage());
-            acknowledgment.acknowledge();
+    @KafkaListener(topics = KafkaConfiguration.TOPIC_NAME, groupId = KafkaConfiguration.GROUP_ID, batch = "true")
+    public void onMessages(List<ConsumerRecord<String, String>> records, Acknowledgment acknowledgment) {
+        long startMillis = System.currentTimeMillis();
+
+        // Zwei Listen mit gleichem Index: Stelle i gehoert in beiden zur selben Nachricht. Den
+        // Originaleintrag brauchen wir, falls die Nachricht spaeter aufs Dead-Letter-Topic muss.
+        List<ConsumerRecord<String, String>> validRecords = new ArrayList<>();
+        List<ChatMessage> validMessages = new ArrayList<>();
+
+        for (ConsumerRecord<String, String> record : records) {
+            try {
+                ChatMessage message = messageParser.parse(record.value());
+                validRecords.add(record);
+                validMessages.add(message);
+            } catch (InvalidMessageException broken) {
+                // Klasse 1: kaputte Nachricht - kommt gar nicht erst ins INSERT.
+                deadLetterPublisher.publish(record, broken.getMessage());
+            }
+        }
+
+        writeBatch(validRecords, validMessages);
+        acknowledgment.acknowledge();
+
+        long elapsedMillis = System.currentTimeMillis() - startMillis;
+        log.info("Paket mit {} Nachrichten in {} ms geschrieben", validMessages.size(), elapsedMillis);
+    }
+
+    /**
+     * Schreibt das Paket gebuendelt. Lehnt die Datenbank eine einzige Zeile ab, scheitert das
+     * ganze Paket - dann schreiben wir es einmal Zeile fuer Zeile, damit nur die schuldige Zeile
+     * aufs Dead-Letter-Topic geht und alle anderen gespeichert werden.
+     */
+    private void writeBatch(List<ConsumerRecord<String, String>> validRecords, List<ChatMessage> validMessages) {
+        // Waren alle Nachrichten kaputt, gibt es nichts zu schreiben.
+        if (validMessages.isEmpty()) {
             return;
         }
-
         try {
-            messageWriter.insertOne(message);
+            messageWriter.insertBatch(validMessages);
         } catch (DataIntegrityViolationException rejected) {
-            // Klasse 2: die Datenbank lehnt genau diese Zeile ab (z. B. unbekannter Raum).
-            // Alle anderen Fehler (Klasse 3, Datenbank weg) fangen wir bewusst NICHT: sie fliegen
-            // weiter, es wird nicht bestaetigt, und Spring wiederholt die Nachricht alle 5 Sekunden.
+            // Klasse 2 im Paket. Alle anderen Fehler (Klasse 3, Datenbank weg) fangen wir bewusst
+            // NICHT: sie fliegen weiter, und Spring wiederholt das ganze Paket alle 5 Sekunden.
             String reason = rejectionReason(rejected);
-            deadLetterPublisher.publish(record, reason);
+            log.warn("Paket mit {} Nachrichten abgelehnt ({}) - schreibe Zeile fuer Zeile",
+                    validMessages.size(), reason);
+            writeOneByOne(validRecords, validMessages);
         }
+    }
 
-        acknowledgment.acknowledge();
+    /**
+     * Einzelweg nach einem abgelehnten Paket. Zeilen, die vor dem Fehler schon geschrieben wurden,
+     * ueberspringt ON CONFLICT - das Wiederholen ist deshalb ungefaehrlich.
+     */
+    private void writeOneByOne(List<ConsumerRecord<String, String>> validRecords, List<ChatMessage> validMessages) {
+        for (int index = 0; index < validMessages.size(); index++) {
+            ChatMessage message = validMessages.get(index);
+            ConsumerRecord<String, String> record = validRecords.get(index);
+            try {
+                messageWriter.insertOne(message);
+            } catch (DataIntegrityViolationException rejected) {
+                String reason = rejectionReason(rejected);
+                deadLetterPublisher.publish(record, reason);
+            }
+        }
     }
 
     /** Macht aus der Ablehnung der Datenbank einen lesbaren Grund fuer den Dead-Letter-Header. */
