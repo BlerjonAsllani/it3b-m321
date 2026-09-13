@@ -5,15 +5,24 @@ spring:
   # Verbindung zur Datenbank aus docker-compose.
   # Zugangsdaten stehen hier im Klartext, weil das eine Uebungsumgebung ist.
   datasource:
-    # reWriteBatchedInserts=true: ohne diesen Zusatz schickt der PostgreSQL-Treiber die
-    # Zeilen eines batchUpdate trotzdem einzeln ueber die Leitung - das Buendeln waere umsonst.
-    url: jdbc:postgresql://localhost:5432/chat?reWriteBatchedInserts=true
+    url: jdbc:postgresql://localhost:5432/chat
     username: chat
     password: chat
     hikari:
       # So lange wartet der Verbindungspool hoechstens auf eine Datenbankverbindung (Standard:
       # 30 Sekunden). Ist Postgres weg, merkt der Listener das so nach 5 statt nach 30 Sekunden.
       connection-timeout: 5000
+      data-source-properties:
+        # reWriteBatchedInserts: ohne diesen Zusatz schickt der PostgreSQL-Treiber die Zeilen
+        # eines batchUpdate trotzdem einzeln ueber die Leitung - das Buendeln waere umsonst. Er
+        # steht hier und nicht in der URL, damit er auch dann noch gilt, wenn die URL von aussen
+        # ueberschrieben wird (z. B. in docker-compose).
+        reWriteBatchedInserts: true
+        # Ohne Obergrenze wartet ein INSERT unbegrenzt lange, wenn die Datenbank haengt statt die
+        # Verbindung abzulehnen (z. B. docker pause statt docker stop). Nach 30 Sekunden bricht
+        # der Treiber ab, der Fehler erreicht den Listener und wird wie jeder andere
+        # Datenbankfehler wiederholt.
+        socketTimeout: 30
 
   kafka:
     bootstrap-servers: localhost:9092

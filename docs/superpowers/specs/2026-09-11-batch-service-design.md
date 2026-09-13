@@ -113,14 +113,18 @@ Alle Zahlen sind Startwerte und werden mit dem Lastskript nachgestellt.
 
 | Einstellung | Wert | Warum |
 |---|---|---|
-| `spring.datasource.url` | `jdbc:postgresql://localhost:5432/chat?reWriteBatchedInserts=true` | Ohne `reWriteBatchedInserts` schickt der Treiber die 500 Zeilen trotzdem einzeln |
-| `spring.kafka.consumer.group-id` | `batch-service` | Dauerhafte Gruppe, merkt sich ihre Position |
+| `spring.datasource.url` | `jdbc:postgresql://localhost:5432/chat` (ohne Parameter) | Verbindung zur Datenbank aus docker-compose |
+| `spring.datasource.hikari.connection-timeout` | `5000` | So lange wartet der Verbindungspool höchstens auf eine Datenbankverbindung (Standard: 30 Sekunden). Ist Postgres weg, merkt der Listener das so nach 5 statt nach 30 Sekunden |
+| `spring.datasource.hikari.data-source-properties.reWriteBatchedInserts` | `true` | Bündelt die Zeilen eines `batchUpdate` zu wenigen `INSERT` statt vieler einzelner Anweisungen. Steht hier und nicht in der URL, damit es auch gilt, wenn die URL von aussen überschrieben wird (z. B. im Compose) |
+| `spring.datasource.hikari.data-source-properties.socketTimeout` | `30` | Ohne Obergrenze wartet ein `INSERT` unbegrenzt lange, wenn die Datenbank hängt (z. B. `docker pause`), statt die Verbindung abzulehnen. Nach 30 Sekunden bricht der Treiber ab, der Fehler erreicht den Listener und wird wie jeder andere Datenbankfehler wiederholt |
+| Consumer-Gruppe | `batch-service` | Nicht in `application.yml` gesetzt, sondern im Code: `@KafkaListener(groupId = ...)` mit `KafkaConfiguration.GROUP_ID`. Dauerhafte Gruppe, merkt sich ihre Position |
 | `spring.kafka.consumer.auto-offset-reset` | `earliest` | Beim allerersten Start liest die Gruppe das Topic von Anfang an — auch Nachrichten, die gesendet wurden, bevor es den `batch-service` gab |
 | `spring.kafka.consumer.enable-auto-commit` | `false` | Offsets committet nur der Listener selbst |
 | `spring.kafka.listener.ack-mode` | `manual` | `acknowledge()` erst nach dem Schreiben |
 | `spring.kafka.consumer.max-poll-records` | `500` | Obergrenze pro Paket |
 | `spring.kafka.consumer.fetch-max-wait` | `200ms` | Höchstens so lange wartet der Broker auf genug Daten |
 | `spring.kafka.consumer.fetch-min-size` | `100KB` | Etwa 500 Nachrichten zu ~200 Byte |
+| `spring.kafka.producer.properties.[max.block.ms]` | `5000` | So lange darf `send()` beim Schreiben auf das Dead-Letter-Topic höchstens blockieren, wenn der Broker nicht erreichbar ist |
 | Schlüssel/Wert | `StringDeserializer` / `StringSerializer` (für das DLT) | JSON als Text, wie beim `chat-service` |
 
 `max-poll-records`, `fetch-max-wait` und `fetch-min-size` ergeben zusammen eine **Annäherung** an
@@ -134,7 +138,10 @@ JSON wird mit dem `ObjectMapper` von Spring Boot gelesen; `sentAt` kommt als ISO
 - `INFO` pro Paket: «Paket mit 500 Nachrichten in 12 ms geschrieben» — die Grundlage der Messung.
 - `DEBUG` pro Zeile im `MessageWriter`.
 - `WARN` für jede Nachricht, die auf das Dead-Letter-Topic geht, mit Grund.
-- `ERROR` einmal pro fehlgeschlagenem Versuch bei nicht erreichbarer Datenbank.
+- `ERROR` einmal pro fehlgeschlagenem Versuch bei einem Datenbankfehler (nicht nur bei nicht
+  erreichbarer Datenbank — jedes Problem, das keine abgelehnte Zeile ist, z. B. auch der
+  JDBC-`socketTimeout`, wenn die Datenbank hängt statt die Verbindung abzulehnen).
+- `ERROR` wenn das Schreiben auf das Dead-Letter-Topic selbst scheitert.
 
 ---
 

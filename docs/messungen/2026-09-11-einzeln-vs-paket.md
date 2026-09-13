@@ -9,6 +9,9 @@ Postgres und Kafka im Compose, `batch-service` vom Host aus.
 |---|---|---|---|
 | 1 — einzeln (`insertOne`, ein Commit pro Nachricht) | 100 000 | 116 s | 862 |
 | 2 — gebündelt (`insertBatch`, bis 500 pro Paket) | 100 000 | 7 s | 14 285 |
+| 2 — gebündelt, Wiederholung am 2026-09-13 | 100 000 | 8 s | 12 500 |
+
+Stufe 1 lässt sich mit Commit `7282d07` nachmessen (Stufe 2 hat den Code ersetzt).
 
 Einstellungen: `max-poll-records: 500`, `fetch-max-wait: 200ms`, `fetch-min-size: 100KB`,
 JDBC-URL mit `reWriteBatchedInserts=true`, Log-Level `INFO`.
@@ -18,13 +21,11 @@ bei etwa ±2 Sekunden.
 
 ## Einordnung
 
-Stufe 2 ist rund 17-mal schneller als Stufe 1: 7 statt 116 Sekunden für dieselben 100 000
-Nachrichten, 14 285 statt 862 Nachrichten pro Sekunde. Dabei war die Datenbank nicht mehr der
-Engpass: Pakete mit bis zu 500 Nachrichten standen laut Log in 12 bis 20 ms geschrieben, der Lauf
-dauerte insgesamt kaum länger als das Einspielen der 100 000 Nachrichten aufs Topic selbst (2 s)
-plus das Nachziehen des Consumers (rund 5 s) — Engpass war also das Lastskript bzw. Kafka, nicht
-der `batch-service`. Für die 100 000 Nachrichten pro Sekunde aus PLANUNG.md, Abschnitt 2.3, heisst
-das: eine einzelne Instanz schafft mit gemessenen 14 285 Nachrichten pro Sekunde selbst gebündelt
-nur gut ein Siebtel der Zielgrösse und ist damit, wie in PLANUNG.md 2.3 und 2.4 beschrieben, allein
-nicht für diese Last ausgelegt — das Bündeln hat aber sein eigentliches Ziel erreicht: die Datenbank
-als Engpass zu beseitigen.
+> Stufe 2 ist rund 15-mal schneller als Stufe 1: 7 bzw. 8 Sekunden statt 116 Sekunden für dieselben
+> 100 000 Nachrichten, also etwa 12 500–14 300 statt 862 Nachrichten pro Sekunde (Genauigkeit etwa
+> ±2 Sekunden). Die Datenbank ist damit nicht mehr der Engpass (ein Paket mit 500 Nachrichten stand
+> in 12–40 ms in der Datenbank). Wo die Grenze jetzt liegt — beim Lastskript, bei Kafka oder beim
+> `batch-service` selbst —, zeigt diese Messung nicht; dafür müsste man die Last so weit erhöhen,
+> dass der Lag dauerhaft wächst. Für die 100 000 Nachrichten pro Sekunde aus `PLANUNG.md`,
+> Abschnitt 2.3, heisst das nur: eine einzelne Instanz hat in diesem Lauf rund ein Siebtel bis ein
+> Achtel davon geschafft; ob sie mehr kann, ist offen.

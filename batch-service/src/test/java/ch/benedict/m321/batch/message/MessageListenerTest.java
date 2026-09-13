@@ -141,6 +141,42 @@ class MessageListenerTest {
         verify(acknowledgment, never()).acknowledge();
     }
 
+    /**
+     * Scheitert schon das Ablegen einer kaputten Nachricht auf dem Dead-Letter-Topic, fliegt
+     * dieser Fehler weiter: ohne bestaetigtes Dead-Letter-Topic darf das Paket nicht als erledigt
+     * gelten, sonst waere die Nachricht endgueltig verloren.
+     */
+    @Test
+    void deadLetterFailureIsPassedOnAndNotAcknowledged() {
+        ConsumerRecord<String, String> broken = recordWithValue(0, "{kaputt");
+        List<ConsumerRecord<String, String>> records = List.of(broken);
+        doThrow(new IllegalStateException("Dead-Letter-Topic hat nicht bestaetigt"))
+                .when(deadLetterPublisher).publish(eq(broken), anyString());
+
+        assertThrows(IllegalStateException.class, () -> listener.onMessages(records, acknowledgment));
+
+        verify(acknowledgment, never()).acknowledge();
+        verify(messageWriter, never()).insertBatch(anyList());
+    }
+
+    /**
+     * Sind alle Nachrichten eines Pakets kaputt, gibt es nichts zu schreiben - trotzdem wird das
+     * Paket bestaetigt, sobald jede einzelne Nachricht auf dem Dead-Letter-Topic liegt.
+     */
+    @Test
+    void batchOfOnlyBrokenMessagesIsAcknowledgedWithoutInsert() {
+        ConsumerRecord<String, String> firstBroken = recordWithValue(0, "{kaputt1");
+        ConsumerRecord<String, String> secondBroken = recordWithValue(1, "{kaputt2");
+        List<ConsumerRecord<String, String>> records = List.of(firstBroken, secondBroken);
+
+        listener.onMessages(records, acknowledgment);
+
+        verify(deadLetterPublisher).publish(eq(firstBroken), anyString());
+        verify(deadLetterPublisher).publish(eq(secondBroken), anyString());
+        verify(messageWriter, never()).insertBatch(anyList());
+        verify(acknowledgment).acknowledge();
+    }
+
     /** Baut gueltiges Nachrichten-JSON mit einer eigenen ID pro Nummer. */
     private String validJson(int number) {
         return String.format("{\"id\":\"aaaaaaaa-0000-0000-0000-%012d\","

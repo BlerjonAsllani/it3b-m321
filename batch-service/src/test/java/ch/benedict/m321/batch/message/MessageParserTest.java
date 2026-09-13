@@ -77,4 +77,18 @@ class MessageParserTest {
         assertNull(message.text());
         assertNull(message.sentAt());
     }
+
+    /**
+     * Prueft, dass ein Zeitpunkt nach dem Jahr 9999 als ungueltige Nachricht gemeldet wird:
+     * gueltiges JSON und ein gueltiger Instant, aber Timestamp.from() koennte ihn nie speichern.
+     */
+    @Test
+    void rejectsTimeAfterYear9999() {
+        String json = "{\"id\":\"aaaaaaaa-0000-0000-0000-000000000001\","
+                + "\"roomId\":\"11111111-1111-1111-1111-111111111111\","
+                + "\"sender\":\"lernende1\",\"text\":\"Hallo\","
+                + "\"sentAt\":\"+300000000-01-01T00:00:00Z\"}";
+
+        assertThrows(InvalidMessageException.class, () -> parser.parse(json));
+    }
 }

@@ -353,9 +353,10 @@ sequenceDiagram
         lange der Broker auf genug Daten wartet, regeln <code>fetch.min.bytes</code> und
         <code>fetch.max.wait.ms: 200</code>. Das ist eine Annäherung über zwei Einstellungen,
         keine einzelne Garantie.</li>
-        <li>Geschrieben wird mit <code>JdbcTemplate.batchUpdate(…)</code>. In der JDBC-URL muss
-        <code>reWriteBatchedInserts=true</code> stehen, sonst schickt der PostgreSQL-Treiber die
-        Zeilen trotzdem einzeln über die Leitung.</li>
+        <li>Geschrieben wird mit <code>JdbcTemplate.batchUpdate(…)</code>. Der Treiber braucht dafür
+        <code>reWriteBatchedInserts=true</code> (als Hikari-<code>data-source-properties</code>,
+        nicht in der URL — so gilt es auch bei einer von aussen überschriebenen URL), sonst
+        schickt der PostgreSQL-Treiber die Zeilen trotzdem einzeln über die Leitung.</li>
         <li><b>Offsets erst nach dem Commit.</b> <code>ack-mode: MANUAL</code> — die Gruppe
         committet ihre Offsets erst, nachdem <code>batchUpdate</code> erfolgreich war.</li>
       </ol>
@@ -414,7 +415,8 @@ sequenceDiagram
               <td>Ohne Offset-Commit wird dieselbe Nachricht endlos erneut gelesen</td>
               <td><code>@RetryableTopic</code> mit drei Versuchen und
               <code>DeadLetterPublishingRecoverer</code>. Danach landet die Nachricht auf dem
-              Dead-Letter-Topic <code>chat.messages-dlt</code>.</td></tr>
+              Dead-Letter-Topic <code>chat.messages-dlt</code> (später ersetzt, siehe Nachtrag
+              «batch-service» in PLANUNG.md).</td></tr>
         </tbody>
       </table>
       </div>

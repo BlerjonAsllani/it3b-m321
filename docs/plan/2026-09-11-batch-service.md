@@ -43,10 +43,10 @@ Diese Punkte gelten für **jede** Aufgabe in diesem Plan.
 > **Wenn auf eurem Rechner schon ein Postgres auf Port 5432 läuft:** dann erreicht `localhost:5432`
 > den falschen Server. Abhilfe: in einer **nicht committeten** `docker-compose.override.yml` den
 > Port des Containers umlegen (z. B. `127.0.0.1:5433:5432`) und die URL per Umgebungsvariable
-> überschreiben — **mit** dem Zusatz für das Bündeln:
-> `SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5433/chat?reWriteBatchedInserts=true`.
-> Fehlt `?reWriteBatchedInserts=true`, läuft alles, aber die Paketstufe ist langsamer als nötig
-> und die Messung falsch.
+> überschreiben: `SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5433/chat`. Der Zusatz fürs
+> Bündeln (`reWriteBatchedInserts=true`) steht seit Task 2 nicht mehr in der URL, sondern unter
+> `spring.datasource.hikari.data-source-properties` in `application.yml` — er gilt deshalb auch
+> bei einer überschriebenen URL automatisch mit.
 
 ### Was dieser Plan **nicht** enthält
 
@@ -320,15 +320,24 @@ spring:
   # Verbindung zur Datenbank aus docker-compose.
   # Zugangsdaten stehen hier im Klartext, weil das eine Uebungsumgebung ist.
   datasource:
-    # reWriteBatchedInserts=true: ohne diesen Zusatz schickt der PostgreSQL-Treiber die
-    # Zeilen eines batchUpdate trotzdem einzeln ueber die Leitung - das Buendeln waere umsonst.
-    url: jdbc:postgresql://localhost:5432/chat?reWriteBatchedInserts=true
+    url: jdbc:postgresql://localhost:5432/chat
     username: chat
     password: chat
     hikari:
       # So lange wartet der Verbindungspool hoechstens auf eine Datenbankverbindung (Standard:
       # 30 Sekunden). Ist Postgres weg, merkt der Listener das so nach 5 statt nach 30 Sekunden.
       connection-timeout: 5000
+      data-source-properties:
+        # reWriteBatchedInserts: ohne diesen Zusatz schickt der PostgreSQL-Treiber die Zeilen
+        # eines batchUpdate trotzdem einzeln ueber die Leitung - das Buendeln waere umsonst. Er
+        # steht hier und nicht in der URL, damit er auch dann noch gilt, wenn die URL von aussen
+        # ueberschrieben wird (z. B. in docker-compose).
+        reWriteBatchedInserts: true
+        # Ohne Obergrenze wartet ein INSERT unbegrenzt lange, wenn die Datenbank haengt statt die
+        # Verbindung abzulehnen (z. B. docker pause statt docker stop). Nach 30 Sekunden bricht
+        # der Treiber ab, der Fehler erreicht den Listener und wird wie jeder andere
+        # Datenbankfehler wiederholt.
+        socketTimeout: 30
 
   kafka:
     bootstrap-servers: localhost:9092
@@ -645,6 +654,20 @@ class MessageParserTest {
         assertNull(message.text());
         assertNull(message.sentAt());
     }
+
+    /**
+     * Prueft, dass ein Zeitpunkt nach dem Jahr 9999 als ungueltige Nachricht gemeldet wird:
+     * gueltiges JSON und ein gueltiger Instant, aber Timestamp.from() koennte ihn nie speichern.
+     */
+    @Test
+    void rejectsTimeAfterYear9999() {
+        String json = "{\"id\":\"aaaaaaaa-0000-0000-0000-000000000001\","
+                + "\"roomId\":\"11111111-1111-1111-1111-111111111111\","
+                + "\"sender\":\"lernende1\",\"text\":\"Hallo\","
+                + "\"sentAt\":\"+300000000-01-01T00:00:00Z\"}";
+
+        assertThrows(InvalidMessageException.class, () -> parser.parse(json));
+    }
 }
 ```
 
@@ -710,6 +733,8 @@ Datei `batch-service/src/main/java/ch/benedict/m321/batch/message/MessageParser.
 ```java
 package ch.benedict.m321.batch.message;
 
+import java.time.Instant;
+
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Component;
@@ -720,6 +745,13 @@ import org.springframework.stereotype.Component;
  */
 @Component
 public class MessageParser {
+
+    /**
+     * Spaetester Zeitpunkt, den die Datenbank noch speichern kann. Ein spaeterer Zeitpunkt ist
+     * gueltiges JSON und ein gueltiger Instant, aber Timestamp.from() wirft dafuer eine Ausnahme -
+     * ohne diese Pruefung wuerde die Nachricht endlos wiederholt, obwohl sie nie speicherbar ist.
+     */
+    private static final Instant LATEST_STORABLE_TIME = Instant.parse("9999-12-31T23:59:59Z");
 
     private final ObjectMapper objectMapper;
 
@@ -754,6 +786,15 @@ public class MessageParser {
         if (message == null) {
             throw new InvalidMessageException("JSON enthaelt keine Nachricht");
         }
+
+        // Ein fehlender Zeitpunkt (null) bleibt erlaubt - das lehnt spaeter die Datenbank ab
+        // (Klasse 2, siehe MessageWriterIntegrationTest). Ein zu spaeter Zeitpunkt waere dagegen
+        // fuer immer kaputt: Timestamp.from() wirft dafuer eine ArithmeticException, und ohne
+        // diese Pruefung wuerde die Nachricht als "Datenbank weg" endlos wiederholt.
+        if (message.sentAt() != null && message.sentAt().isAfter(LATEST_STORABLE_TIME)) {
+            throw new InvalidMessageException(
+                    "Zeitpunkt liegt nach dem Jahr 9999 und kann nicht gespeichert werden: " + message.sentAt());
+        }
         return message;
     }
 }
@@ -765,7 +806,7 @@ public class MessageParser {
 mvn test
 ```
 
-Erwartet: **BESTANDEN.** `Tests run: 6, Failures: 0, Errors: 0` (1 aus Task 2, 5 neue).
+Erwartet: **BESTANDEN.** `Tests run: 7, Failures: 0, Errors: 0` (1 aus Task 2, 6 neue).
 
 - [ ] **Schritt 7: Commit**
 
@@ -986,9 +1027,10 @@ public class MessageWriter {
     }
 
     /**
-     * Schreibt viele Nachrichten mit einem einzigen batchUpdate. Dank reWriteBatchedInserts in
-     * der JDBC-URL macht der Treiber daraus wenige INSERT mit vielen Zeilen statt vieler
-     * einzelner Anweisungen - das ist der ganze Gewinn des Buendelns.
+     * Schreibt viele Nachrichten mit einem einzigen batchUpdate. Dank reWriteBatchedInserts (in
+     * den Hikari-data-source-properties, nicht in der URL) macht der Treiber daraus wenige
+     * INSERT mit vielen Zeilen statt vieler einzelner Anweisungen - das ist der ganze Gewinn des
+     * Buendelns.
      */
     public void insertBatch(List<ChatMessage> messages) {
         List<Object[]> allValues = new ArrayList<>();
@@ -1021,7 +1063,7 @@ public class MessageWriter {
 mvn test
 ```
 
-Erwartet: **BESTANDEN.** `Tests run: 12, Failures: 0, Errors: 0` (6 bisher, 6 neue).
+Erwartet: **BESTANDEN.** `Tests run: 13, Failures: 0, Errors: 0` (7 bisher, 6 neue).
 
 Danach prüfen, dass der Rollback gewirkt hat — keine Testzeilen in der Datenbank:
 
@@ -1207,24 +1249,36 @@ public class DeadLetterPublisher {
         // send() arbeitet im Hintergrund, in einem Thread des Kafka-Clients, und liefert nur ein
         // "Versprechen" (CompletableFuture). Auf das Ergebnis warten wir gleich darunter.
         CompletableFuture<SendResult<String, String>> pending = kafkaTemplate.send(deadLetter);
-        waitForKafka(pending);
+        waitForKafka(pending, original);
     }
 
     /**
-     * Wartet auf die Bestaetigung von Kafka. Scheitert sie, fliegt eine Ausnahme weiter: der
-     * Listener bestaetigt das Paket dann nicht, Spring wiederholt es - die Nachricht geht nicht verloren.
+     * Wartet auf die Bestaetigung von Kafka. Scheitert sie, wird das laut gemeldet und eine
+     * Ausnahme fliegt weiter: der Listener bestaetigt das Paket dann nicht, Spring wiederholt es -
+     * die Nachricht geht nicht verloren. Ohne die Meldung saehe man diesen Ausfall gar nicht, weil
+     * "Datenbank weg" (Klasse 3) denselben Datensatz sonst still weiterreicht.
      */
-    private void waitForKafka(CompletableFuture<SendResult<String, String>> pending) {
+    private void waitForKafka(CompletableFuture<SendResult<String, String>> pending,
+                               ConsumerRecord<String, String> original) {
         try {
             pending.get(SEND_TIMEOUT_SECONDS, TimeUnit.SECONDS);
         } catch (ExecutionException | TimeoutException failure) {
+            logPublishFailure(original);
             throw new IllegalStateException("Dead-Letter-Topic hat nicht bestaetigt", failure);
         } catch (InterruptedException interrupted) {
             // Der Thread wurde beim Warten unterbrochen, zum Beispiel beim Herunterfahren.
             // Wir setzen die Unterbrechungs-Markierung wieder, damit Spring davon erfaehrt.
             Thread.currentThread().interrupt();
+            logPublishFailure(original);
             throw new IllegalStateException("Warten auf das Dead-Letter-Topic wurde unterbrochen", interrupted);
         }
+    }
+
+    /** Meldet laut, welcher Original-Datensatz nicht auf das Dead-Letter-Topic abgelegt werden konnte. */
+    private void logPublishFailure(ConsumerRecord<String, String> original) {
+        log.error("Nachricht aus {} Partition {} Offset {} konnte nicht auf {} abgelegt werden - Paket wird wiederholt",
+                original.topic(), original.partition(), original.offset(),
+                KafkaConfiguration.DEAD_LETTER_TOPIC_NAME);
     }
 }
 ```
@@ -1235,7 +1289,7 @@ public class DeadLetterPublisher {
 mvn test
 ```
 
-Erwartet: **BESTANDEN.** `Tests run: 14, Failures: 0, Errors: 0` (12 bisher, 2 neue).
+Erwartet: **BESTANDEN.** `Tests run: 15, Failures: 0, Errors: 0` (13 bisher, 2 neue).
 
 - [ ] **Schritt 5: Commit**
 
@@ -1466,7 +1520,7 @@ public class MessageListener {
 mvn test
 ```
 
-Erwartet: **BESTANDEN.** `Tests run: 18, Failures: 0, Errors: 0` (14 bisher, 4 neue).
+Erwartet: **BESTANDEN.** `Tests run: 19, Failures: 0, Errors: 0` (15 bisher, 4 neue).
 `BatchServiceApplicationTest` läuft weiter mit angehaltenem Listener — er liest also noch nichts.
 
 - [ ] **Schritt 5: Von Hand prüfen — eine gesendete Nachricht erscheint im Verlauf**
@@ -1573,9 +1627,16 @@ set -euo pipefail
 COUNT="${1:-100000}"
 ROOM_ID="11111111-1111-1111-1111-111111111111"
 
-# Acht Hex-Ziffern aus der aktuellen Sekunde machen die IDs jedes Laufs eindeutig. Sonst wuerde
-# ein zweiter Lauf an ON CONFLICT abprallen und waere scheinbar sofort fertig.
-RUN_ID=$(printf '%08x' "$(date +%s)")
+# Laenger als das darf das Warten auf die Datenbank hoechstens dauern - sonst haengt das Skript
+# ewig, wenn der batch-service nicht laeuft oder Nachrichten auf dem Dead-Letter-Topic landen
+# statt gezaehlt zu werden.
+MAX_WAIT_SECONDS=300
+
+# Acht Hex-Ziffern aus der aktuellen Sekunde, dazu vier Hex-Ziffern der Prozess-ID dieses
+# Skripts, machen die IDs jedes Laufs eindeutig - auch bei zwei Laeufen in derselben Sekunde
+# (die Sekunde allein war nicht kollisionssicher). Sonst wuerde ein zweiter Lauf an ON CONFLICT
+# abprallen und waere scheinbar sofort fertig.
+RUN_ID=$(printf '%08x-%04x' "$(date +%s)" "$(( $$ % 65536 ))")
 SENT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 # Zaehlt alle Zeilen der Tabelle message.
@@ -1598,10 +1659,11 @@ START=$(date +%s)
 
 # awk erzeugt die Nachrichten viel schneller als eine Bash-Schleife. Jede Zeile ist
 # "<schluessel><TAB><json>"; kafka-console-producer trennt am Tabulator Schluessel und Wert.
-# Die ID hat das UUID-Format: 8 Hex-Ziffern des Laufs, dann die laufende Nummer.
+# Die ID hat das UUID-Format: die 13 Zeichen von RUN_ID (Sekunde + Prozess-ID), dann die
+# laufende Nummer.
 awk -v count="$COUNT" -v run="$RUN_ID" -v room="$ROOM_ID" -v sentAt="$SENT_AT" 'BEGIN {
   for (i = 1; i <= count; i++) {
-    printf "%s\t{\"id\":\"%s-0000-4000-8000-%012d\",\"roomId\":\"%s\",\"sender\":\"lasttest\",\"text\":\"Lastnachricht %d\",\"sentAt\":\"%s\"}\n", room, run, i, room, i, sentAt
+    printf "%s\t{\"id\":\"%s-4000-8000-%012d\",\"roomId\":\"%s\",\"sender\":\"lasttest\",\"text\":\"Lastnachricht %d\",\"sentAt\":\"%s\"}\n", room, run, i, room, i, sentAt
   }
 }' | docker exec -i m321-kafka /opt/kafka/bin/kafka-console-producer.sh \
       --bootstrap-server localhost:9092 --topic chat.messages \
@@ -1616,10 +1678,20 @@ while true; do
   if [ "$NOW_ROWS" -ge "$TARGET" ]; then
     break
   fi
+  # Ohne diese Grenze wuerde das Skript ewig warten, wenn der batch-service gar nicht laeuft
+  # oder ein Teil der Nachrichten nie in der Datenbank ankommt, sondern auf dem
+  # Dead-Letter-Topic landet (dann zaehlt count_rows sie nie mit).
+  WAITED=$(( $(date +%s) - START ))
+  if [ "$WAITED" -ge "$MAX_WAIT_SECONDS" ]; then
+    echo "Abbruch: nach $WAITED s immer noch nicht alle Nachrichten in der Datenbank" \
+         "($((NOW_ROWS - BEFORE)) von $COUNT). Laeuft der batch-service? Liegen Nachrichten" \
+         "auf chat.messages-dlt statt in der Datenbank?" >&2
+    exit 1
+  fi
   # Den Lag nur jede vierte Runde abfragen: das Werkzeug braucht selbst ein bis zwei Sekunden
   # und wuerde sonst die Messung ungenau machen.
   if [ $((LOOP % 4)) -eq 0 ]; then
-    echo "  nach $(( $(date +%s) - START )) s: $((NOW_ROWS - BEFORE)) von $COUNT gespeichert, Lag $(current_lag)"
+    echo "  nach $WAITED s: $((NOW_ROWS - BEFORE)) von $COUNT gespeichert, Lag $(current_lag)"
   fi
   LOOP=$((LOOP + 1))
   sleep 0.5
@@ -1858,6 +1930,42 @@ class MessageListenerTest {
         verify(acknowledgment, never()).acknowledge();
     }
 
+    /**
+     * Scheitert schon das Ablegen einer kaputten Nachricht auf dem Dead-Letter-Topic, fliegt
+     * dieser Fehler weiter: ohne bestaetigtes Dead-Letter-Topic darf das Paket nicht als erledigt
+     * gelten, sonst waere die Nachricht endgueltig verloren.
+     */
+    @Test
+    void deadLetterFailureIsPassedOnAndNotAcknowledged() {
+        ConsumerRecord<String, String> broken = recordWithValue(0, "{kaputt");
+        List<ConsumerRecord<String, String>> records = List.of(broken);
+        doThrow(new IllegalStateException("Dead-Letter-Topic hat nicht bestaetigt"))
+                .when(deadLetterPublisher).publish(eq(broken), anyString());
+
+        assertThrows(IllegalStateException.class, () -> listener.onMessages(records, acknowledgment));
+
+        verify(acknowledgment, never()).acknowledge();
+        verify(messageWriter, never()).insertBatch(anyList());
+    }
+
+    /**
+     * Sind alle Nachrichten eines Pakets kaputt, gibt es nichts zu schreiben - trotzdem wird das
+     * Paket bestaetigt, sobald jede einzelne Nachricht auf dem Dead-Letter-Topic liegt.
+     */
+    @Test
+    void batchOfOnlyBrokenMessagesIsAcknowledgedWithoutInsert() {
+        ConsumerRecord<String, String> firstBroken = recordWithValue(0, "{kaputt1");
+        ConsumerRecord<String, String> secondBroken = recordWithValue(1, "{kaputt2");
+        List<ConsumerRecord<String, String>> records = List.of(firstBroken, secondBroken);
+
+        listener.onMessages(records, acknowledgment);
+
+        verify(deadLetterPublisher).publish(eq(firstBroken), anyString());
+        verify(deadLetterPublisher).publish(eq(secondBroken), anyString());
+        verify(messageWriter, never()).insertBatch(anyList());
+        verify(acknowledgment).acknowledge();
+    }
+
     /** Baut gueltiges Nachrichten-JSON mit einer eigenen ID pro Nummer. */
     private String validJson(int number) {
         return String.format("{\"id\":\"aaaaaaaa-0000-0000-0000-%012d\","
@@ -1953,23 +2061,30 @@ public class MessageListener {
 
         try {
             writeBatch(validRecords, validMessages);
-        } catch (DataAccessException unreachable) {
-            // Klasse 3: die Datenbank hat gerade ein Problem, zum Beispiel ist sie nicht erreichbar -
-            // egal ob beim gebuendelten Schreiben oder mitten im Einzelweg. Ablehnungen einzelner
-            // Zeilen (Klasse 2) kommen hier nie an, die faengt writeBatch selbst. Wir melden den
-            // Ausfall laut und werfen den Fehler weiter: Spring wiederholt dann das ganze Paket,
-            // bestaetigt wird nichts. Ohne diese Meldung liefe die Wiederholung still ab, und man
-            // saehe den Ausfall nur am wachsenden Lag.
-            Throwable databaseError = unreachable.getMostSpecificCause();
-            String databaseMessage = databaseError.getMessage();
-            log.error("Datenbank nicht erreichbar ({}) - Paket mit {} Nachrichten wird wiederholt",
-                    databaseMessage, validMessages.size());
-            throw unreachable;
+        } catch (DataAccessException problem) {
+            // Klasse 3: die Datenbank hat gerade irgendein Problem - nicht erreichbar, zu
+            // langsam (Fix A: socketTimeout) oder etwas anderes, das keine abgelehnte Zeile ist.
+            // Egal ob beim gebuendelten Schreiben oder mitten im Einzelweg. Ablehnungen einzelner
+            // Zeilen (Klasse 2) kommen hier nie an, die faengt writeBatch selbst.
+            reportDatabaseProblem(problem, records.size());
+            throw problem;
         }
         acknowledgment.acknowledge();
 
         long elapsedMillis = System.currentTimeMillis() - startMillis;
         log.info("Paket mit {} Nachrichten in {} ms geschrieben", validMessages.size(), elapsedMillis);
+    }
+
+    /**
+     * Meldet einen Datenbankfehler laut, bevor er weitergeworfen wird. Wir werfen den Fehler
+     * weiter: Spring wiederholt dann das ganze Paket, bestaetigt wird nichts. Ohne diese Meldung
+     * liefe die Wiederholung still ab, und man saehe den Ausfall nur am wachsenden Lag.
+     */
+    private void reportDatabaseProblem(DataAccessException problem, int recordCount) {
+        Throwable databaseError = problem.getMostSpecificCause();
+        String databaseMessage = databaseError.getMessage();
+        log.error("Datenbankfehler ({}: {}) - Paket mit {} Nachrichten wird wiederholt",
+                problem.getClass().getSimpleName(), databaseMessage, recordCount);
     }
 
     /**
@@ -2028,7 +2143,7 @@ public class MessageListener {
 mvn test
 ```
 
-Erwartet: **BESTANDEN.** `Tests run: 19, Failures: 0, Errors: 0` (14 aus Task 2–5, 5 neue
+Erwartet: **BESTANDEN.** `Tests run: 22, Failures: 0, Errors: 0` (15 aus Task 2–5, 7 neue
 Listener-Tests; die 4 Tests der Stufe 1 sind ersetzt).
 
 - [ ] **Schritt 5: Von Hand prüfen — ein gemischtes Paket**
@@ -2071,7 +2186,7 @@ echo
 ```
 
 Erwartet: zehnmal `202` — der `chat-service` braucht zum Senden keine Datenbank. Im Log des
-`batch-service` alle 5 bis 10 Sekunden eine `ERROR`-Zeile «Datenbank nicht erreichbar (…) - Paket
+`batch-service` alle 5 bis 10 Sekunden eine `ERROR`-Zeile «Datenbankfehler (…: …) - Paket
 mit … Nachrichten wird wiederholt»: 5 Sekunden pausiert die Fehlerbehandlung (`FixedBackOff`), dazu
 wartet der Verbindungspool bis zu 5 Sekunden auf eine Verbindung (`connection-timeout`). Weist der
 gestoppte Container die Verbindung sofort ab («Connection refused»), sind es eher 6 Sekunden. Nach
@@ -2301,7 +2416,7 @@ git commit -m "docs: PLANUNG.md und README nach dem batch-service nachziehen"
 
 ## Fertig, wenn …
 
-- [ ] `mvn test` im Verzeichnis `batch-service` ist grün (19 Tests), `mvn test` im `chat-service` weiterhin
+- [ ] `mvn test` im Verzeichnis `batch-service` ist grün (22 Tests), `mvn test` im `chat-service` weiterhin
 - [ ] `docker compose down && docker compose up -d` behält Topics und Offsets (Volume `kafka-data`)
 - [ ] Eine per `POST /api/messages` gesendete Nachricht steht nach etwa einer Sekunde im Verlauf
 - [ ] Unbekannter Raum und kaputtes JSON landen auf `chat.messages-dlt`, mit Grund im Header
@@ -2362,7 +2477,7 @@ in eine eigene Ausnahme — wer den eigentlichen Grund will, muss ihn auspacken.
 | **Gepruefte `InvalidMessageException`** | Der Compiler zwingt den Listener, kaputte Nachrichten zu behandeln. | `Optional<ChatMessage>` — kürzer, aber der Grund des Fehlers geht verloren |
 | **Kafka legt keine Topics mehr selbst an** | Sonst entsteht `chat.messages` mit 1 statt 6 Partitionen, wenn der `batch-service` vor dem `chat-service` startet. | Das Topic zusätzlich im `batch-service` als `NewTopic` anmelden — dann aber an zwei Stellen dieselben Werte pflegen |
 | **Log-Level `INFO`** | Eine Zeile pro Nachricht würde die Messung verfälschen. | Für die Fehlersuche `DEBUG` in `application.yml` |
-| **Doppelte Einträge im Dead-Letter-Topic möglich** | Scheitert ein Paket an «Datenbank weg» *nachdem* eine kaputte Nachricht schon abgelegt ist, wird sie beim Wiederholen ein zweites Mal abgelegt. Im Chat-Verlauf entsteht nichts Doppeltes; das Dead-Letter-Topic ist nur eine Ablage zum Anschauen. | Die Einträge im Dead-Letter-Topic über ihre ID entdoppeln, wenn man sie einmal erneut einspielen will |
+| **Doppelte Einträge im Dead-Letter-Topic möglich** | Scheitert ein Paket an «Datenbank weg», nachdem eine kaputte Nachricht schon abgelegt wurde, legt jeder weitere Wiederholungsversuch sie erneut ab — bei einer dauerhaft nicht erreichbaren Datenbank also etwa alle 6 Sekunden, solange der Ausfall dauert. Dasselbe gilt für eine schuldige Zeile, wenn die Datenbank mitten im Einzelweg ausfällt. Im Chat-Verlauf entsteht dabei nichts Doppeltes; das Dead-Letter-Topic ist nur eine Ablage zum Anschauen. | Die Einträge im Dead-Letter-Topic über ihre ID entdoppeln, wenn man sie einmal erneut einspielen will |
 | **Integrationstest gegen die Compose-Datenbank statt Testcontainers** | Keine zusätzliche Bibliothek; `@JdbcTest` rollt jeden Test zurück. | Testcontainers — dann laufen die Tests auch ohne gestartetes Compose, braucht aber eine neue Abhängigkeit |
 
 ---

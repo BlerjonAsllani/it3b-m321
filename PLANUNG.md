@@ -128,7 +128,7 @@ sequenceDiagram
 
   C->>G: POST /api/messages + Bearer-Token
   G->>A: weiterleiten
-  A->>A: Token prüfen, UUID + Zeitstempel setzen
+  A->>A: Token prüfen, Mitgliedschaft lesen, UUID + Zeitstempel setzen
   A->>K: send(topic=chat.messages, key=roomId)
   A-->>C: 202 Accepted
   Note over K: jede Consumer-Gruppe<br/>bekommt eine eigene Kopie
@@ -170,9 +170,10 @@ Rechenbeispiel für die Klasse: 100 000 ÷ 500 = **200 Schreibvorgänge pro Seku
   bevor er antwortet, wird über `fetch.min.bytes` und `fetch.max.wait.ms: 200` angenähert.
   Das Ergebnis liegt nahe an «500 oder 200 ms», ist aber eine Annäherung über zwei getrennte
   Broker-Einstellungen, keine einzelne Garantie.
-- Geschrieben wird mit `JdbcTemplate.batchUpdate(...)`. In der JDBC-URL muss
-  `reWriteBatchedInserts=true` stehen, sonst schickt der PostgreSQL-Treiber die Zeilen trotzdem
-  einzeln über die Leitung.
+- Geschrieben wird mit `JdbcTemplate.batchUpdate(...)`. Der Treiber braucht dafür
+  `reWriteBatchedInserts=true` (als Hikari-`data-source-properties`, nicht in der URL — sonst
+  ginge die Einstellung verloren, sobald die URL von aussen überschrieben wird, z. B. im Compose),
+  sonst schickt der PostgreSQL-Treiber die Zeilen trotzdem einzeln über die Leitung.
 - **Offsets erst nach dem Commit.** `spring.kafka.listener.ack-mode: MANUAL` — der Listener
   committet die Offsets seiner Gruppe erst, nachdem `batchUpdate` erfolgreich war. Das ist die
   genaue Entsprechung zum «ACK erst nach dem Commit» bei RabbitMQ.
@@ -181,7 +182,7 @@ Rechenbeispiel für die Klasse: 100 000 ÷ 500 = **200 Schreibvorgänge pro Seku
 
 | Risiko | Antwort |
 |---|---|
-| Absturz mitten im Paket → Nachrichten weg | **Offset-Commit erst nach dem Commit** der Datenbank-Transaktion. Ohne Commit liest die Gruppe beim nächsten Poll ab derselben Stelle erneut. |
+| Absturz mitten im Paket → Nachrichten weg | **Offset-Commit erst nach dem erfolgreichen Schreiben.** Ohne Commit liest die Gruppe beim nächsten Poll ab derselben Stelle erneut. |
 | Erneute Zustellung → Nachricht doppelt in der DB | Die UUID kommt vom `chat-service` und ist der Primärschlüssel. `ON CONFLICT (id) DO NOTHING` verwirft die Dublette. |
 | Reihenfolge | Zwei Gründe gemeinsam: der Zeitstempel wird im `chat-service` gesetzt, nicht von der Datenbank — und **Kafka garantiert Reihenfolge innerhalb einer Partition**. Weil `roomId` der Schlüssel ist, landen alle Nachrichten eines Raums garantiert in derselben Partition und damit in Sendereihenfolge. Über Räume hinweg gibt es keine Ordnungsgarantie — das ist unproblematisch, weil Räume unabhängig sind. |
 | Datenbank kommt nicht nach | Der **Consumer-Lag** der Gruppe `batch-service` wächst — **sichtbar** über `kafka-consumer-groups.sh --describe --group batch-service` oder eine Kafka-UI. Genau das ist die Lehrstunde zu Backpressure. |
@@ -217,7 +218,8 @@ sichtbar blockieren als still Nachrichten verlieren»), müsste `chat-service` d
 `POST /api/messages` ab einer Lag-Schwelle mit `503` ablehnen. Das ist **nicht eingebaut** und
 noch nicht gebaut — siehe offener Punkt in Abschnitt 4. Bis dahin ist eine grosszügige Retention
 auf `chat.messages` (z. B. 7 Tage) die einzige Absicherung: sie verschafft Zeit, verhindert den
-Datenverlust aber nicht endgültig.
+Datenverlust aber nicht endgültig. Aktuell läuft `chat.messages` mit der Standard-Retention des
+Brokers (Kafka-Standard: 7 Tage); bewusst festgelegt wird sie erst in Teilprojekt 4.
 
 **Dieselbe Nachricht, zwei Consumer-Strategien, gegensätzliche Regeln.**
 
@@ -351,10 +353,10 @@ Gespeichert wird nur der Benutzername als Absender.
    eigenen Header senden. Varianten: Token als Query-Parameter (unschön, landet im Log),
    ein kurzlebiges Ticket vor dem Verbindungsaufbau, oder `fetch`-basiertes SSE. Zu entscheiden.
 3. **Paketgrösse und Wartezeit** — gemessen am 2026-09-11 (einzeln) und 2026-09-12 (gebündelt),
-   `docs/messungen/2026-09-11-einzeln-vs-paket.md`: einzeln 862 Nachrichten/s, gebündelt
-   14 285 Nachrichten/s, mit `max.poll.records: 500`, `fetch.max.wait.ms: 200`,
-   `fetch.min.bytes: 100 KB`. Erneut nachmessen, sobald die Dienste im Compose laufen
-   (Teilprojekt 4).
+   `docs/messungen/2026-09-11-einzeln-vs-paket.md`: einzeln 862 Nachrichten/s, gebündelt etwa
+   12 500–14 300 Nachrichten/s (zwei Läufe), mit `max.poll.records: 500`, `fetch.max.wait.ms: 200`,
+   `fetch.min.bytes: 100 KB`. Die Startwerte haben sich bewährt; andere Werte wurden nicht
+   ausprobiert. Erneut nachmessen, sobald die Dienste im Compose laufen (Teilprojekt 4).
 4. **Kein automatisches Backpressure auf den Sender.** Anders als RabbitMQ blockiert Kafka
    `chat-service` beim Senden nicht von sich aus, wenn `batch-service` dauerhaft nicht nachkommt
    (Abschnitt 2.4). Um «sichtbar blockieren statt still verlieren» zu erreichen, müsste
@@ -397,7 +399,8 @@ Plan und Umsetzung:
 2. **Live-Anzeige per SSE** — `GET /stream`, jede `chat-service`-Instanz mit eigener, flüchtiger
    Consumer-Gruppe (`auto.offset.reset: latest`).
 3. **Gateway und React-Oberfläche** — nginx als einziger offener Port; `chat-service` und
-   `batch-service` wandern ins Compose, die veröffentlichten Ports werden zu `expose`.
+   `batch-service` wandern ins Compose, die veröffentlichten Ports werden zu `expose`, und die
+   Retention von `chat.messages` bewusst festlegen.
 4. **Keycloak-Login** — Realm-Import, Token-Prüfung, Absender aus dem Token statt aus dem Request.
 5. **Zeitgesteuerte Aufgaben** im `batch-service` (Archivierung, Statistik) und **JavaFX-Client**.
 
@@ -565,7 +568,7 @@ Abschnitt 2 neu durchdacht, nicht nur umbenannt:
 | `chat.live.<instanz>` mit `x-max-length`/TTL, damit Alt-Nachrichten verworfen werden | Flüchtige Consumer-Gruppe je Instanz, `auto.offset.reset: latest`, nie committete Offsets | Statt Nachrichten aktiv zu verwerfen, werden sie strukturell nie zweimal gelesen — kein Wegwerf-Mechanismus mehr nötig |
 | `chat.persist` als dauerhafte Queue, ACK erst nach Commit | Dauerhafte Consumer-Gruppe `batch-service`, Offset-Commit erst nach Commit | Gleiches Prinzip, andere Mechanik |
 | RabbitMQ bremst überlastete Producer automatisch (Flow Control) | **Kein eingebautes Gegenstück.** Kafka ist ein retention-basierter Log, kein grössenbegrenzter Speicher, der den Sender bremst | Echter Funktionsverlust — siehe unten |
-| Quorum-Queue mit `x-delivery-limit`, Dead-Letter-Queue | `@RetryableTopic` (nicht-blockierende Wiederholung) mit Dead-Letter-**Topic** | Vergleichbares Ergebnis, anderer Baustein |
+| Quorum-Queue mit `x-delivery-limit`, Dead-Letter-Queue | `@RetryableTopic` (nicht-blockierende Wiederholung) mit Dead-Letter-**Topic** (später ersetzt, siehe Nachtrag «batch-service») | Vergleichbares Ergebnis, anderer Baustein |
 | Reihenfolge nur über den vom Sender gesetzten Zeitstempel | Zusätzlich: Kafka garantiert Reihenfolge **innerhalb einer Partition** — `roomId` als Schlüssel sichert Reihenfolge pro Raum strukturell | Eine echte Verbesserung gegenüber der RabbitMQ-Fassung |
 
 **Was ehrlich schlechter geworden ist, nicht nur anders.** Der wichtigste Punkt: RabbitMQs
@@ -599,8 +602,8 @@ ausschliesslich den Broker und alles, was direkt an seinen Bausteinen hängt.
 
 **Was ich ohne Rückfrage festgelegt habe:** die Aufteilung in eine flüchtige Gruppe pro Instanz
 (Live-Anzeige) und eine dauerhafte Gruppe (`batch-service`), `roomId` als Partitionsschlüssel,
-und den Umgang mit Giftnachrichten über `@RetryableTopic`. Alle drei sind ohne Umbau der
-Architektur änderbar.
+und den Umgang mit Giftnachrichten über `@RetryableTopic` (später ersetzt, siehe Nachtrag
+«batch-service»). Alle drei sind ohne Umbau der Architektur änderbar.
 
 ### Nachtrag — batch-service (Teilprojekt 1)
 
@@ -622,13 +625,15 @@ Der `batch-service` ist gebaut, nach dem Design
   Klickbares da ist; Keycloak ersetzt danach das vorläufige Absenderfeld.
 
 Gemessen (`docs/messungen/2026-09-11-einzeln-vs-paket.md`): einzeln 862 Nachrichten/s, gebündelt
-14 285 Nachrichten/s — rund 17-mal schneller; die Datenbank ist damit nicht mehr der Engpass.
+etwa 12 500–14 300 Nachrichten/s — rund 15-mal schneller; die Datenbank ist damit nicht mehr der
+Engpass.
 
 **Bei der Handprüfung aufgefallen:** Bei nicht erreichbarer Datenbank wiederholte der
 `batch-service` zwar korrekt und verlor nichts, schrieb aber keine einzige Zeile ins Log — Spring
 wiederholt still, man sah den Ausfall nur am Lag. Das Design verlangte eine `ERROR`-Zeile pro
-Versuch; sie ist nachgerüstet («Datenbank nicht erreichbar (…) - Paket mit … Nachrichten wird
-wiederholt»).
+Versuch; sie ist nachgerüstet («Datenbankfehler (…: …) - Paket mit … Nachrichten wird
+wiederholt») — und gilt seit der Schlussprüfung für jeden Datenbankfehler, nicht nur für eine nicht
+erreichbare Datenbank.
 
 **Was ich ohne Rückfrage festgelegt habe:** `spring-boot-starter-json` als zusätzliche Abhängigkeit
 (ohne Web-Starter fehlt sonst der `ObjectMapper`), ein Volume für Kafka und

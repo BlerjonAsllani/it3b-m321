@@ -57,23 +57,35 @@ public class DeadLetterPublisher {
         // send() arbeitet im Hintergrund, in einem Thread des Kafka-Clients, und liefert nur ein
         // "Versprechen" (CompletableFuture). Auf das Ergebnis warten wir gleich darunter.
         CompletableFuture<SendResult<String, String>> pending = kafkaTemplate.send(deadLetter);
-        waitForKafka(pending);
+        waitForKafka(pending, original);
     }
 
     /**
-     * Wartet auf die Bestaetigung von Kafka. Scheitert sie, fliegt eine Ausnahme weiter: der
-     * Listener bestaetigt das Paket dann nicht, Spring wiederholt es - die Nachricht geht nicht verloren.
+     * Wartet auf die Bestaetigung von Kafka. Scheitert sie, wird das laut gemeldet und eine
+     * Ausnahme fliegt weiter: der Listener bestaetigt das Paket dann nicht, Spring wiederholt es -
+     * die Nachricht geht nicht verloren. Ohne die Meldung saehe man diesen Ausfall gar nicht, weil
+     * "Datenbank weg" (Klasse 3) denselben Datensatz sonst still weiterreicht.
      */
-    private void waitForKafka(CompletableFuture<SendResult<String, String>> pending) {
+    private void waitForKafka(CompletableFuture<SendResult<String, String>> pending,
+                               ConsumerRecord<String, String> original) {
         try {
             pending.get(SEND_TIMEOUT_SECONDS, TimeUnit.SECONDS);
         } catch (ExecutionException | TimeoutException failure) {
+            logPublishFailure(original);
             throw new IllegalStateException("Dead-Letter-Topic hat nicht bestaetigt", failure);
         } catch (InterruptedException interrupted) {
             // Der Thread wurde beim Warten unterbrochen, zum Beispiel beim Herunterfahren.
             // Wir setzen die Unterbrechungs-Markierung wieder, damit Spring davon erfaehrt.
             Thread.currentThread().interrupt();
+            logPublishFailure(original);
             throw new IllegalStateException("Warten auf das Dead-Letter-Topic wurde unterbrochen", interrupted);
         }
+    }
+
+    /** Meldet laut, welcher Original-Datensatz nicht auf das Dead-Letter-Topic abgelegt werden konnte. */
+    private void logPublishFailure(ConsumerRecord<String, String> original) {
+        log.error("Nachricht aus {} Partition {} Offset {} konnte nicht auf {} abgelegt werden - Paket wird wiederholt",
+                original.topic(), original.partition(), original.offset(),
+                KafkaConfiguration.DEAD_LETTER_TOPIC_NAME);
     }
 }

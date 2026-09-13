@@ -63,23 +63,30 @@ public class MessageListener {
 
         try {
             writeBatch(validRecords, validMessages);
-        } catch (DataAccessException unreachable) {
-            // Klasse 3: die Datenbank hat gerade ein Problem, zum Beispiel ist sie nicht erreichbar -
-            // egal ob beim gebuendelten Schreiben oder mitten im Einzelweg. Ablehnungen einzelner
-            // Zeilen (Klasse 2) kommen hier nie an, die faengt writeBatch selbst. Wir melden den
-            // Ausfall laut und werfen den Fehler weiter: Spring wiederholt dann das ganze Paket,
-            // bestaetigt wird nichts. Ohne diese Meldung liefe die Wiederholung still ab, und man
-            // saehe den Ausfall nur am wachsenden Lag.
-            Throwable databaseError = unreachable.getMostSpecificCause();
-            String databaseMessage = databaseError.getMessage();
-            log.error("Datenbank nicht erreichbar ({}) - Paket mit {} Nachrichten wird wiederholt",
-                    databaseMessage, validMessages.size());
-            throw unreachable;
+        } catch (DataAccessException problem) {
+            // Klasse 3: die Datenbank hat gerade irgendein Problem - nicht erreichbar, zu
+            // langsam (Fix A: socketTimeout) oder etwas anderes, das keine abgelehnte Zeile ist.
+            // Egal ob beim gebuendelten Schreiben oder mitten im Einzelweg. Ablehnungen einzelner
+            // Zeilen (Klasse 2) kommen hier nie an, die faengt writeBatch selbst.
+            reportDatabaseProblem(problem, records.size());
+            throw problem;
         }
         acknowledgment.acknowledge();
 
         long elapsedMillis = System.currentTimeMillis() - startMillis;
         log.info("Paket mit {} Nachrichten in {} ms geschrieben", validMessages.size(), elapsedMillis);
+    }
+
+    /**
+     * Meldet einen Datenbankfehler laut, bevor er weitergeworfen wird. Wir werfen den Fehler
+     * weiter: Spring wiederholt dann das ganze Paket, bestaetigt wird nichts. Ohne diese Meldung
+     * liefe die Wiederholung still ab, und man saehe den Ausfall nur am wachsenden Lag.
+     */
+    private void reportDatabaseProblem(DataAccessException problem, int recordCount) {
+        Throwable databaseError = problem.getMostSpecificCause();
+        String databaseMessage = databaseError.getMessage();
+        log.error("Datenbankfehler ({}: {}) - Paket mit {} Nachrichten wird wiederholt",
+                problem.getClass().getSimpleName(), databaseMessage, recordCount);
     }
 
     /**

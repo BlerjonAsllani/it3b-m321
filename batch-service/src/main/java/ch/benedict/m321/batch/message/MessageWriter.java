@@ -46,9 +46,10 @@ public class MessageWriter {
     }
 
     /**
-     * Schreibt viele Nachrichten mit einem einzigen batchUpdate. Dank reWriteBatchedInserts in
-     * der JDBC-URL macht der Treiber daraus wenige INSERT mit vielen Zeilen statt vieler
-     * einzelner Anweisungen - das ist der ganze Gewinn des Buendelns.
+     * Schreibt viele Nachrichten mit einem einzigen batchUpdate. Dank reWriteBatchedInserts (in
+     * den Hikari-data-source-properties, nicht in der URL) macht der Treiber daraus wenige
+     * INSERT mit vielen Zeilen statt vieler einzelner Anweisungen - das ist der ganze Gewinn des
+     * Buendelns.
      */
     public void insertBatch(List<ChatMessage> messages) {
         List<Object[]> allValues = new ArrayList<>();
