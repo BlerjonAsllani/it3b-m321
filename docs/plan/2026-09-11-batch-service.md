@@ -1897,6 +1897,7 @@ import ch.benedict.m321.batch.kafka.KafkaConfiguration;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataAccessException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.support.Acknowledgment;
@@ -1950,7 +1951,21 @@ public class MessageListener {
             }
         }
 
-        writeBatch(validRecords, validMessages);
+        try {
+            writeBatch(validRecords, validMessages);
+        } catch (DataAccessException unreachable) {
+            // Klasse 3: die Datenbank hat gerade ein Problem, zum Beispiel ist sie nicht erreichbar -
+            // egal ob beim gebuendelten Schreiben oder mitten im Einzelweg. Ablehnungen einzelner
+            // Zeilen (Klasse 2) kommen hier nie an, die faengt writeBatch selbst. Wir melden den
+            // Ausfall laut und werfen den Fehler weiter: Spring wiederholt dann das ganze Paket,
+            // bestaetigt wird nichts. Ohne diese Meldung liefe die Wiederholung still ab, und man
+            // saehe den Ausfall nur am wachsenden Lag.
+            Throwable databaseError = unreachable.getMostSpecificCause();
+            String databaseMessage = databaseError.getMessage();
+            log.error("Datenbank nicht erreichbar ({}) - Paket mit {} Nachrichten wird wiederholt",
+                    databaseMessage, validMessages.size());
+            throw unreachable;
+        }
         acknowledgment.acknowledge();
 
         long elapsedMillis = System.currentTimeMillis() - startMillis;
@@ -1970,8 +1985,8 @@ public class MessageListener {
         try {
             messageWriter.insertBatch(validMessages);
         } catch (DataIntegrityViolationException rejected) {
-            // Klasse 2 im Paket. Alle anderen Fehler (Klasse 3, Datenbank weg) fangen wir bewusst
-            // NICHT: sie fliegen weiter, und Spring wiederholt das ganze Paket alle 5 Sekunden.
+            // Klasse 2 im Paket: mindestens eine Zeile wird nie speicherbar sein. Andere Fehler
+            // (Klasse 3, Datenbank weg) fangen wir hier bewusst NICHT - sie gehen an onMessages.
             String reason = rejectionReason(rejected);
             log.warn("Paket mit {} Nachrichten abgelehnt ({}) - schreibe Zeile fuer Zeile",
                     validMessages.size(), reason);
@@ -2056,9 +2071,11 @@ echo
 ```
 
 Erwartet: zehnmal `202` — der `chat-service` braucht zum Senden keine Datenbank. Im Log des
-`batch-service` etwa alle 10 Sekunden ein Fehler, dass die Verbindung nicht klappt: 5 Sekunden
-wartet der Verbindungspool (`connection-timeout`), 5 Sekunden pausiert die Fehlerbehandlung
-(`FixedBackOff`). Nach etwa 15 Sekunden:
+`batch-service` alle 5 bis 10 Sekunden eine `ERROR`-Zeile «Datenbank nicht erreichbar (…) - Paket
+mit … Nachrichten wird wiederholt»: 5 Sekunden pausiert die Fehlerbehandlung (`FixedBackOff`), dazu
+wartet der Verbindungspool bis zu 5 Sekunden auf eine Verbindung (`connection-timeout`). Weist der
+gestoppte Container die Verbindung sofort ab («Connection refused»), sind es eher 6 Sekunden. Nach
+etwa 15 Sekunden:
 
 ```bash
 docker exec m321-kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
