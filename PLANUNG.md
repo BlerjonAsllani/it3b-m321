@@ -94,9 +94,11 @@ Liefert das React-Bundle aus und leitet weiter:
 
 1. Der Client sendet `POST /api/messages` mit Bearer-Token an das Gateway.
 2. Das Gateway leitet an `chat-service` weiter.
-3. `chat-service` prüft das Token, vergibt eine UUID und einen Zeitstempel — und schreibt die
-   Nachricht mit `roomId` als **Schlüssel** auf das Topic `chat.messages`. Danach antwortet es dem
-   Client. **Keine Datenbank im Anfrageweg.**
+3. `chat-service` prüft das Token und mit **einer lesenden** Abfrage auf `room_member`, ob der
+   Absender Mitglied des Raums ist (gebaut in Teilprojekt 2). Dann vergibt es eine UUID und einen
+   Zeitstempel und schreibt die Nachricht mit `roomId` als **Schlüssel** auf das Topic
+   `chat.messages`. Danach antwortet es dem Client. **Kein schreibender Datenbankzugriff im
+   Anfrageweg** — gespeichert wird ausschliesslich im `batch-service`.
 4. Am Topic hängen zwei Arten von Consumer-Gruppen — Kafka liefert jeder eigenen Gruppe eine
    vollständige Kopie des Topics, das übernimmt die Rolle, die bei RabbitMQ ein Fanout-Exchange
    hatte:
@@ -205,8 +207,8 @@ RabbitMQ:
 | Fall | Was passiert | Was wir tun |
 |---|---|---|
 | **Kurzer Rückstau** — eine Lastspitze | Lag wächst und baut sich wieder ab | Nichts. Genau dafür ist der Puffer da. |
-| **Dauerhafter Rückstau** — Datenbank langsam oder weg | Lag wächst unbegrenzt weiter | **Kafka blockiert `chat-service` beim Senden nicht von sich aus** — anders als RabbitMQ hat ein Topic keine Speichergrenze, die den Produzenten bremst. Der Log wächst, solange `retention.ms`/`retention.bytes` es zulassen. Ohne eigenes Zutun laufen alte, noch nicht gespeicherte Nachrichten irgendwann aus der Retention und sind **verloren** — genau das, was wir bei RabbitMQ ausdrücklich ausschliessen wollten. |
-| **Giftnachricht** — eine einzelne Nachricht lässt sich nie schreiben | Ohne Offset-Commit liest der Consumer dieselbe Nachricht immer wieder | Spring Kafka `@RetryableTopic` (nicht-blockierende Wiederholung, 3 Versuche) mit `DeadLetterPublishingRecoverer`. Nach drei Versuchen wandert die Nachricht auf das Topic `chat.messages-dlt` und kann dort angeschaut werden. |
+| **Dauerhafter Rückstau** — Datenbank langsam oder weg | Lag wächst unbegrenzt weiter | **Kafka blockiert `chat-service` beim Senden nicht von sich aus** — anders als RabbitMQ hat ein Topic keine Speichergrenze, die den Produzenten bremst. Der Log wächst, solange `retention.ms`/`retention.bytes` es zulassen. Ohne eigenes Zutun laufen alte, noch nicht gespeicherte Nachrichten irgendwann aus der Retention und sind **verloren** — genau das, was wir bei RabbitMQ ausdrücklich ausschliessen wollten. Der `batch-service` selbst wiederholt das Paket bei nicht erreichbarer Datenbank alle 5 Sekunden ohne Ende und bestätigt nichts — der Lag wächst sichtbar, auf seiner Seite geht nichts verloren. |
+| **Giftnachricht** — eine einzelne Nachricht lässt sich nie schreiben | Ohne Offset-Commit liest der Consumer dieselbe Nachricht immer wieder | Der `batch-service` legt sie auf das Topic `chat.messages-dlt` (Grund im Header `error-reason`) und bestätigt. Kaputtes JSON geht sofort dorthin, eine von der Datenbank abgelehnte Zeile nach dem Einzelweg (siehe unten). Keine Wiederholungsschleife: diese Nachricht wird nie speicherbar. |
 
 **Der ehrliche Unterschied zu RabbitMQ, ausdrücklich benannt.** RabbitMQ bremst überlastete
 Producer automatisch (*Flow Control*) — Kafka nicht. Um dieselbe Garantie zu bekommen («lieber
@@ -230,11 +232,12 @@ gerade braucht. Bei RabbitMQ war das eine Frage der Queue-Konfiguration (`x-max-
 `x-delivery-limit`); bei Kafka ist es eine Frage der Consumer-Gruppen-Strategie
 (committete vs. nie committete Offsets).
 
-**Ein Haken, der zum Bündeln gehört.** `@RetryableTopic` zählt pro Nachricht — aber schiefgehen
-kann nur das ganze Paket. Eine einzige kaputte Nachricht lässt alle 500 scheitern und schickt am
-Ende alle 500 auf das DLT. Antwort darauf: schlägt ein Paket fehl, schreibt der `batch-service`
-dieses eine Paket **einmalig Zeile für Zeile**. Dann scheitert nur die wirklich kaputte
-Nachricht, die restlichen 499 sind gespeichert. Steht als offener Punkt drin.
+**Ein Haken, der zum Bündeln gehört.** Lehnt die Datenbank eine einzige Zeile ab, scheitert das
+ganze `batchUpdate` — alle 500. Antwort darauf: der `batch-service` schreibt dieses eine Paket dann
+**einmalig Zeile für Zeile**. Nur die wirklich schuldige Zeile geht auf das Dead-Letter-Topic, die
+restlichen 499 sind gespeichert; schon geschriebene Zeilen überspringt `ON CONFLICT`. Spring Kafkas
+`@RetryableTopic` wäre hier keine Lösung: es wird für Batch-Listener gar nicht unterstützt (siehe
+Nachtrag «batch-service»).
 
 ### 2.5 Login-Ablauf (Keycloak)
 
@@ -347,17 +350,18 @@ Gespeichert wird nur der Benutzername als Absender.
 2. **SSE und der Authorization-Header.** Das native `EventSource` im Browser kann **keine**
    eigenen Header senden. Varianten: Token als Query-Parameter (unschön, landet im Log),
    ein kurzlebiges Ticket vor dem Verbindungsaufbau, oder `fetch`-basiertes SSE. Zu entscheiden.
-3. **Paketgrösse und Wartezeit sind geraten.** `max.poll.records: 500`, `fetch.max.wait.ms: 200`
-   sind Startwerte, keine gemessenen — und wie in Abschnitt 2.3 erklärt ohnehin nur eine
-   Annäherung an «500 oder 200 ms». Müssen unter Last nachgestellt werden.
+3. **Paketgrösse und Wartezeit** — gemessen am 2026-09-11 (einzeln) und 2026-09-12 (gebündelt),
+   `docs/messungen/2026-09-11-einzeln-vs-paket.md`: einzeln 862 Nachrichten/s, gebündelt
+   14 285 Nachrichten/s, mit `max.poll.records: 500`, `fetch.max.wait.ms: 200`,
+   `fetch.min.bytes: 100 KB`. Erneut nachmessen, sobald die Dienste im Compose laufen
+   (Teilprojekt 4).
 4. **Kein automatisches Backpressure auf den Sender.** Anders als RabbitMQ blockiert Kafka
    `chat-service` beim Senden nicht von sich aus, wenn `batch-service` dauerhaft nicht nachkommt
    (Abschnitt 2.4). Um «sichtbar blockieren statt still verlieren» zu erreichen, müsste
    `chat-service` den Consumer-Lag von `batch-service` selbst prüfen und ab einer Schwelle mit
    `503` antworten. **Noch nicht gebaut.**
-5. **Einzelweg nach einem fehlgeschlagenen Paket** (Abschnitt 2.4). Schlägt ein Paket fehl,
-   soll der `batch-service` es einmalig Zeile für Zeile schreiben, damit nur die tatsächlich
-   kaputte Nachricht auf dem Dead-Letter-Topic landet. Noch nicht gebaut.
+5. **Einzelweg nach einem fehlgeschlagenen Paket** — erledigt im `batch-service` (Teilprojekt 1,
+   Abschnitt 2.4).
 6. **Existiert der eingeladene Benutzername überhaupt?** Beim Einladen prüfen wir vorerst
    **nicht** gegen Keycloak. Ein Tippfehler legt dann eine Mitgliedschaft für jemanden an, den
    es nicht gibt — harmlos, aber unschön. Später über die Keycloak-Admin-API prüfbar.
@@ -381,25 +385,21 @@ Gespeichert wird nur der Benutzername als Absender.
 
 ## 5. Nächste Schritte
 
-1. `docker-compose.yml` mit Keycloak, Kafka (KRaft-Modus), PostgreSQL — hochfahren und prüfen,
-   dass von aussen nur Port 8080 antwortet.
-2. Keycloak-Realm `chat` mit einem Testnutzer anlegen und exportieren, damit der Realm beim
-   Start automatisch importiert wird.
-3. `chat-service`: `POST /api/messages` schreibt auf das Topic `chat.messages` (Schlüssel
-   `roomId`), `GET /api/messages` liest aus der Datenbank. Noch ohne Consumer — die Nachricht
-   landet erst mal nirgends, ausser im Topic-Log selbst.
-4. `batch-service`: Consumer-Gruppe `batch-service` auf `chat.messages`, **zuerst einzeln
-   schreiben**. Damit ist der Weg Ende zu Ende sichtbar und die Nachricht steht in der Datenbank.
-5. Erst dann auf Bündeln umstellen (`@KafkaListener(batch = "true")`, `batchUpdate`) und den
-   Unterschied messen. Diese Reihenfolge ist Absicht: man sieht, was das Bündeln bringt.
-6. Raumverwaltung: Tabellen `room` und `room_member`, die drei Endpunkte, und die
-   Mitgliedsprüfung beim Senden und Lesen.
-7. SSE-Endpunkt und React-Oberfläche — jede `chat-service`-Instanz mit eigener, flüchtiger
+Umgesetzt: Infrastruktur (Postgres, Kafka mit Volume), `chat-service` mit Lesen und Senden
+(`docs/plan/2026-09-04-chat-service-bootstrap.md`), `batch-service` mit Einzel- und Paketstufe
+(`docs/plan/2026-09-11-batch-service.md`).
+
+Weiter in dieser Reihenfolge (entschieden am 2026-09-11), jedes Teilprojekt mit eigenem Design,
+Plan und Umsetzung:
+
+1. **Räume und Mitgliedsprüfung** — die Tabellen `room` und `room_member` gibt es schon; dazu die
+   drei Endpunkte und die lesende Mitgliedsprüfung beim Senden und Lesen.
+2. **Live-Anzeige per SSE** — `GET /stream`, jede `chat-service`-Instanz mit eigener, flüchtiger
    Consumer-Gruppe (`auto.offset.reset: latest`).
-8. Kafka-Regeln aus Abschnitt 2.4 setzen (Retention auf `chat.messages`, `@RetryableTopic` mit
-   Dead-Letter-Topic) und den Rückstau über den Consumer-Lag von `batch-service` provozieren.
-9. Zeitgesteuerte Aufgaben im `batch-service` (Archivierung, Statistik).
-10. JavaFX-Client.
+3. **Gateway und React-Oberfläche** — nginx als einziger offener Port; `chat-service` und
+   `batch-service` wandern ins Compose, die veröffentlichten Ports werden zu `expose`.
+4. **Keycloak-Login** — Realm-Import, Token-Prüfung, Absender aus dem Token statt aus dem Request.
+5. **Zeitgesteuerte Aufgaben** im `batch-service` (Archivierung, Statistik) und **JavaFX-Client**.
 
 ---
 
@@ -601,3 +601,36 @@ ausschliesslich den Broker und alles, was direkt an seinen Bausteinen hängt.
 (Live-Anzeige) und eine dauerhafte Gruppe (`batch-service`), `roomId` als Partitionsschlüssel,
 und den Umgang mit Giftnachrichten über `@RetryableTopic`. Alle drei sind ohne Umbau der
 Architektur änderbar.
+
+### Nachtrag — batch-service (Teilprojekt 1)
+
+Der `batch-service` ist gebaut, nach dem Design
+`docs/superpowers/specs/2026-09-11-batch-service-design.md` und dem Plan
+`docs/plan/2026-09-11-batch-service.md`. Drei Punkte dieses Dokuments haben sich dabei geändert:
+
+- **Die Raumprüfung beim Senden ist erlaubt.** Abschnitt 2.2 verbot «Datenbank im Anfrageweg»,
+  Abschnitt 3 verlangte eine Abfrage auf `room_member` beim Senden — ein Widerspruch. Entschieden:
+  gemeint war nur **schreibender** Zugriff. Eine lesende, per Index schnelle Abfrage ist erlaubt und
+  verhindert, dass jemand in fremde oder nicht existierende Räume schreibt. Gebaut wird sie in
+  Teilprojekt 2; bis dahin fängt der `batch-service` Nachrichten für unbekannte Räume über das
+  Dead-Letter-Topic ab — und behält das auch danach als Sicherheitsnetz.
+- **`@RetryableTopic` war falsch.** Spring Kafka unterstützt die nicht-blockierende Wiederholung
+  nicht für Batch-Listener. Ersetzt durch eigenen, lesbaren Code: drei Fehlerklassen (kaputte
+  Nachricht, abgelehnte Zeile, Infrastruktur weg), Einzelweg nach einem abgelehnten Paket, endlose
+  Wiederholung alle 5 Sekunden bei nicht erreichbarer Datenbank.
+- **Neue Reihenfolge der Teilprojekte.** Die React-Oberfläche kommt vor Keycloak, damit früher etwas
+  Klickbares da ist; Keycloak ersetzt danach das vorläufige Absenderfeld.
+
+Gemessen (`docs/messungen/2026-09-11-einzeln-vs-paket.md`): einzeln 862 Nachrichten/s, gebündelt
+14 285 Nachrichten/s — rund 17-mal schneller; die Datenbank ist damit nicht mehr der Engpass.
+
+**Bei der Handprüfung aufgefallen:** Bei nicht erreichbarer Datenbank wiederholte der
+`batch-service` zwar korrekt und verlor nichts, schrieb aber keine einzige Zeile ins Log — Spring
+wiederholt still, man sah den Ausfall nur am Lag. Das Design verlangte eine `ERROR`-Zeile pro
+Versuch; sie ist nachgerüstet («Datenbank nicht erreichbar (…) - Paket mit … Nachrichten wird
+wiederholt»).
+
+**Was ich ohne Rückfrage festgelegt habe:** `spring-boot-starter-json` als zusätzliche Abhängigkeit
+(ohne Web-Starter fehlt sonst der `ObjectMapper`), ein Volume für Kafka und
+`KAFKA_AUTO_CREATE_TOPICS_ENABLE=false` im Compose, 5 Sekunden Wartezeit zwischen zwei Versuchen,
+keine ausdrückliche Transaktion um ein Paket (`ON CONFLICT` macht das Wiederholen ungefährlich).

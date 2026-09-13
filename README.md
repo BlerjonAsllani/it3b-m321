@@ -42,6 +42,10 @@ erreichbar.
 - [`docs/plan/2026-09-04-chat-service-bootstrap.md`](docs/plan/2026-09-04-chat-service-bootstrap.md)
   — Schritt-für-Schritt-Plan für den ersten Service: Projekt anlegen, Datenbank und Kafka
   anbinden, Nachrichten lesen und senden. Jeder Schritt mit Test.
+- [`docs/superpowers/specs/2026-09-11-batch-service-design.md`](docs/superpowers/specs/2026-09-11-batch-service-design.md)
+  — Design des `batch-service`: Einzel- und Paketstufe, Fehlerklassen, Dead-Letter-Topic.
+- [`docs/plan/2026-09-11-batch-service.md`](docs/plan/2026-09-11-batch-service.md)
+  — Schritt-für-Schritt-Plan für den `batch-service`, mit Messung einzeln gegen gebündelt.
 - [`CLAUDE.md`](CLAUDE.md) — Codestil-Regeln für dieses Projekt. Gelten auch für dich.
 - `docs/skizze-architektur.heic` — die Handskizze aus dem Unterricht, von der die Planung ausgeht.
 
@@ -59,5 +63,15 @@ Die vollständigen Regeln stehen in [`CLAUDE.md`](CLAUDE.md).
 
 ## Stand
 
-Das Repository enthält im Moment die Planung und die Dokumente. Der Code entsteht im Unterricht
-entlang des Bootstrap-Plans, Task für Task.
+Gebaut sind der `chat-service` (Verlauf lesen, Nachrichten senden) und der `batch-service`
+(speichert die Nachrichten gebündelt). Eine Chat-Oberfläche gibt es noch nicht — ausprobieren
+über die Swagger-Oberfläche des `chat-service`. Wie es weitergeht, steht in `PLANUNG.md`,
+Abschnitt 5.
+
+## Ausprobieren
+
+1. Docker Desktop starten, dann im Projektwurzelverzeichnis `docker compose up -d`.
+2. Im Ordner `chat-service` und danach im Ordner `batch-service` je `mvn spring-boot:run`
+   (mit Java 21) — der `chat-service` zuerst, er legt das Kafka-Topic an.
+3. <http://localhost:8080/swagger-ui.html> öffnen, mit `POST /api/messages` senden und mit
+   `GET /api/messages` (Raum `11111111-1111-1111-1111-111111111111`) den Verlauf lesen.
