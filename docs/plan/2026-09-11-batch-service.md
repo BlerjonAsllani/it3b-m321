@@ -2063,7 +2063,8 @@ public class MessageListener {
             writeBatch(validRecords, validMessages);
         } catch (DataAccessException problem) {
             // Klasse 3: die Datenbank hat gerade irgendein Problem - nicht erreichbar, zu
-            // langsam (Fix A: socketTimeout) oder etwas anderes, das keine abgelehnte Zeile ist.
+            // langsam (der Treiber bricht dann nach dem socketTimeout ab) oder etwas anderes,
+            // das keine abgelehnte Zeile ist.
             // Egal ob beim gebuendelten Schreiben oder mitten im Einzelweg. Ablehnungen einzelner
             // Zeilen (Klasse 2) kommen hier nie an, die faengt writeBatch selbst.
             reportDatabaseProblem(problem, records.size());
