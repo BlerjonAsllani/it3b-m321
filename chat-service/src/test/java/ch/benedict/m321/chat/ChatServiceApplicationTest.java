@@ -7,8 +7,11 @@ import org.springframework.boot.test.context.SpringBootTest;
  * Prueft, dass Spring alle Klassen zusammenbauen kann. Der Test hat absichtlich keinen
  * Rumpf: faellt beim Hochfahren irgendwo eine Bean weg oder ist eine Konfiguration
  * fehlerhaft, schlaegt er hier fehl, bevor irgendjemand die Anwendung startet.
+ *
+ * auto-create=false: ohne diese Zeile versucht Spring beim Start das Topic anzulegen und
+ * wartet dabei rund 40 Sekunden auf einen Broker, den dieser Test gar nicht braucht.
  */
-@SpringBootTest
+@SpringBootTest(properties = "spring.kafka.admin.auto-create=false")
 class ChatServiceApplicationTest {
 
     @Test

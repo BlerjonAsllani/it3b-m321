@@ -8,7 +8,7 @@ import org.springframework.stereotype.Component;
 
 /**
  * Wandelt den JSON-Text eines Topic-Eintrags in eine ChatMessage um. Die einzige Stelle im
- * batch-service, die das JSON-Format kennt.
+ * batch-writer, die das JSON-Format kennt.
  */
 @Component
 public class MessageParser {

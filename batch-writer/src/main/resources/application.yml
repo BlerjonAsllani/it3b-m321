@@ -42,7 +42,7 @@ spring:
     consumer:
       # Hat die Gruppe noch keine gespeicherte Position (allererster Start), liest sie das
       # Topic von Anfang an - auch Nachrichten, die gesendet wurden, bevor es den
-      # batch-service gab.
+      # batch-writer gab.
       auto-offset-reset: earliest
       # Offsets speichert nur der Listener selbst, nach dem Schreiben in die Datenbank.
       enable-auto-commit: false

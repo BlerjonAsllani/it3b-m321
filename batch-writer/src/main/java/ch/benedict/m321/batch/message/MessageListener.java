@@ -13,7 +13,7 @@ import org.springframework.kafka.support.Acknowledgment;
 import org.springframework.stereotype.Component;
 
 /**
- * Liest die Nachrichten vom Topic chat.messages und sorgt dafuer, dass jede entweder in der
+ * Liest die Nachrichten vom Topic chat.persist und sorgt dafuer, dass jede entweder in der
  * Datenbank oder auf dem Dead-Letter-Topic landet. Entscheidet bei Fehlern, zu welcher der drei
  * Klassen sie gehoeren - SQL, JSON und das Dead-Letter-Topic erledigen andere Klassen.
  */
