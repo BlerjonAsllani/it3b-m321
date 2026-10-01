@@ -8,12 +8,12 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
-import ch.benedict.m321.chat.kafka.KafkaConfiguration;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.kafka.clients.producer.RecordMetadata;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.kafka.KafkaException;
 import org.springframework.kafka.core.KafkaTemplate;
@@ -43,6 +43,9 @@ public class MessageService {
     private final ObjectMapper objectMapper;
     private final MessageRepository messageRepository;
 
+    /** Topic, auf das gesendet wird; kommt aus der Konfiguration (chat.topic). */
+    private final String topicName;
+
     /**
      * Den ObjectMapper reicht Spring Boot herein. Dessen Jackson-Autokonfiguration schreibt
      * Zeitpunkte serienmaessig als lesbaren ISO-Text (z. B. "2026-09-04T08:05:00Z") statt als
@@ -50,10 +53,12 @@ public class MessageService {
      */
     public MessageService(KafkaTemplate<String, String> kafkaTemplate,
                           ObjectMapper objectMapper,
-                          MessageRepository messageRepository) {
+                          MessageRepository messageRepository,
+                          @Value("${chat.topic}") String topicName) {
         this.kafkaTemplate = kafkaTemplate;
         this.objectMapper = objectMapper;
         this.messageRepository = messageRepository;
+        this.topicName = topicName;
     }
 
     /**
@@ -101,7 +106,7 @@ public class MessageService {
         // dass alle Nachrichten eines Raums immer in derselben Partition landen.
         RecordMetadata metadata = result.getRecordMetadata();
         log.info("Nachricht {} liegt auf {} in Partition {} an Offset {}",
-                id, KafkaConfiguration.TOPIC_NAME, metadata.partition(), metadata.offset());
+                id, topicName, metadata.partition(), metadata.offset());
         return message;
     }
 
@@ -120,7 +125,7 @@ public class MessageService {
             // Broker und blockiert dabei bis zu max.block.ms - und kann dann DIREKT HIER, auf
             // dieser Zeile, mit einer Ausnahme scheitern, statt ein Versprechen zurueckzugeben.
             CompletableFuture<SendResult<String, String>> pending =
-                    kafkaTemplate.send(KafkaConfiguration.TOPIC_NAME, partitionKey, json);
+                    kafkaTemplate.send(topicName, partitionKey, json);
             return pending.get(SEND_TIMEOUT_SECONDS, TimeUnit.SECONDS);
         } catch (KafkaException | ExecutionException | TimeoutException failure) {
             // Es gibt zwei Klassen namens KafkaException: org.apache.kafka.common.KafkaException

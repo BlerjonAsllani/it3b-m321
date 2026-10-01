@@ -8,36 +8,33 @@ Grundlage: `docs/spec-batch-writer.md`. Vorbild für den Aufbau: `docs/plan/2026
 Eltern-POM, die Namen aus der Aufgabenstellung, der Betrieb im Compose ohne offene Ports und
 Tests, die ihre Infrastruktur selbst mitbringen.
 
-**Warum diese Reihenfolge.** Erst die Bau- und Namensstruktur (Aufgabe 1 und 2), weil jeder weitere
-Schritt darauf aufsetzt. Dann die Schnittstelle nach aussen (3), dann die Tests (4) — sie sind das
-Netz für alles Folgende. Erst danach der Betrieb im Compose (5), weil sich die Szenarien ohne
-laufenden Stack nicht messen lassen, und zuletzt das Messwerkzeug (6) und die Dokumentation (7).
+**Warum diese Reihenfolge.** Erst die Bau- und Namensstruktur (Aufgabe 1), weil jeder weitere
+Schritt darauf aufsetzt. Dann die Schnittstelle nach aussen (2), dann die Tests (3) — sie sind das
+Netz für alles Folgende. Erst danach der Betrieb im Compose (4), weil sich die Szenarien ohne
+laufenden Stack nicht messen lassen, und zuletzt das Messwerkzeug (5) und die Dokumentation (6).
 
 ---
 
-## Aufgabe 1: Eltern-POM und Umbenennung auf `batch-writer`
+## Aufgabe 1: Eltern-POM, Umbenennung auf `batch-writer`, Topic-Namen
 
 **Warum zuerst:** `mvn clean test` im Wurzelverzeichnis (S1) braucht ein Eltern-POM, und
 `--scale batch-writer=2` (S6) braucht den Namen. Beides ändert Pfade, auf die alles Weitere zeigt.
 
-- Verzeichnis `batch-service/` nach `batch-writer/` umbenennen (`git mv`, Historie bleibt erhalten)
+**Warum in einem Schritt mit den Topic-Namen:** Die umbenannten Klassen tragen die Topic-Namen in
+sich. Getrennt committet wäre ein Zwischenstand entstanden, der nicht kompiliert — die Tests prüfen
+die Namen, die der Dienst benutzt. Ein Schritt, ein lauffähiger Stand.
+
+- Verzeichnis `batch-service/` nach `batch-writer/` umbenennen (`git mv`, Historie bleibt erhalten),
+  ebenso die Startklasse auf `BatchWriterApplication`
 - `pom.xml` im Wurzelverzeichnis: Packaging `pom`, Module `chat-service` und `batch-writer`
-- `artifactId` und `name` des Moduls auf `batch-writer`
-- **Test:** `mvn clean test` im Wurzelverzeichnis baut beide Module, alle Tests grün
-- **Commit:** `build: Eltern-POM und Umbenennung auf batch-writer`
-
-## Aufgabe 2: Topics `chat.persist` und `chat.dlq`, aus der Umgebung konfigurierbar
-
-**Warum hier:** Die Namen stehen in der Aufgabenstellung und tauchen in beiden Diensten auf. Je
-früher sie stimmen, desto weniger muss später angefasst werden.
-
 - `chat.messages` → `chat.persist`, `chat.messages-dlt` → `chat.dlq`
-- Namen aus `CHAT_TOPIC` und `DLQ_TOPIC` lesen, mit genau diesen Werten als Vorgabe
-- Ebenso `BATCH_SIZE`, `BATCH_WAIT_MS`, `RETRY_INTERVAL_MS`
-- **Test:** Kontext-Test prüft, dass die Topic-Beans die Namen aus der Konfiguration tragen
-- **Commit:** `feat: Topics chat.persist und chat.dlq aus der Umgebung lesen`
+- Namen aus `CHAT_TOPIC` und `DLQ_TOPIC` lesen, mit genau diesen Werten als Vorgabe; ebenso
+  `BATCH_SIZE`, `BATCH_WAIT_MS`, `RETRY_INTERVAL_MS`, `BATCH_GROUP_ID`
+- **Test:** `mvn clean test` im Wurzelverzeichnis baut beide Module, alle Tests grün; der
+  Kontext-Test prüft, dass das Dead-Letter-Topic `chat.dlq` heisst
+- **Commit:** `build: Eltern-POM, Umbenennung auf batch-writer und Topic-Namen`
 
-## Aufgabe 3: `POST /messages` im chat-service
+## Aufgabe 2: `POST /messages` im chat-service
 
 **Warum hier:** Szenario S3 sendet an diesen Pfad. Ohne ihn fällt S3 aus, und S4 bis S7 bauen darauf
 auf, weil sie alle Nachrichten über diesen Weg erzeugen.
@@ -46,7 +43,7 @@ auf, weil sie alle Nachrichten über diesen Weg erzeugen.
 - **Test:** `MessageControllerTest` prüft beide Pfade mit 202
 - **Commit:** `feat(chat-service): POST /messages zusaetzlich zu /api/messages`
 
-## Aufgabe 4: Tests bringen ihre Infrastruktur selbst mit
+## Aufgabe 3: Tests bringen ihre Infrastruktur selbst mit
 
 **Warum vor dem Compose-Schritt:** S1 läuft vor S2. Die Tests müssen also in einem frischen Klon
 grün sein, **ohne** dass vorher ein Stack läuft. Ausserdem sind sie das Netz für Aufgabe 5.
@@ -60,7 +57,7 @@ grün sein, **ohne** dass vorher ein Stack läuft. Ausserdem sind sie das Netz f
 - **Test:** `mvn clean test` grün bei gestopptem Compose-Stack
 - **Commit:** `test: Duplikat und Datenbankausfall gegen echte Infrastruktur`
 
-## Aufgabe 5: Beide Dienste im Compose, ohne offene Ports
+## Aufgabe 4: Beide Dienste im Compose, ohne offene Ports
 
 **Warum nach den Tests:** Ab hier wird am Betrieb geschraubt. Grüne Tests zeigen sofort, ob dabei
 etwas kaputtgeht.
@@ -75,9 +72,9 @@ etwas kaputtgeht.
   vier Dienste laufen, keine Spalte PORTS mit `->`
 - **Commit:** `feat(infra): beide Dienste im Compose, keine veroeffentlichten Ports`
 
-## Aufgabe 6: Szenarien-Skript
+## Aufgabe 5: Szenarien-Skript
 
-**Warum zuletzt vor der Doku:** Es misst, was die Aufgaben 1 bis 5 gebaut haben, und liefert die
+**Warum zuletzt vor der Doku:** Es misst, was die Aufgaben 1 bis 4 gebaut haben, und liefert die
 Zahlen für die Abnahmekriterien der Spezifikation.
 
 - `scripts/szenarien.sh s3|s4|s5|s6|s7`, misst von innen mit `psql` und `kafka-consumer-groups.sh`
@@ -85,7 +82,7 @@ Zahlen für die Abnahmekriterien der Spezifikation.
 - **Test:** jedes Teilszenario meldet `BESTANDEN` mit gemessenem Wert
 - **Commit:** `test: Skript fuer die Szenarien S3 bis S7`
 
-## Aufgabe 7: Dokumentation nachführen
+## Aufgabe 6: Dokumentation nachführen
 
 - `README.md`: Tabelle «Stand» um den `batch-writer` ergänzen, Startanleitung auf Compose umstellen
 - `PLANUNG.md`: Topic-Namen und den Betrieb im Compose nachziehen

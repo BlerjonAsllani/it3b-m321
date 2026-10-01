@@ -6,11 +6,11 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
-import ch.benedict.m321.batch.kafka.KafkaConfiguration;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.support.SendResult;
 import org.springframework.stereotype.Component;
@@ -32,9 +32,14 @@ public class DeadLetterPublisher {
 
     private final KafkaTemplate<String, String> kafkaTemplate;
 
-    /** Spring reicht den KafkaTemplate herein; er schreibt Schluessel und Wert als Text. */
-    public DeadLetterPublisher(KafkaTemplate<String, String> kafkaTemplate) {
+    /** Topic fuer nicht speicherbare Nachrichten; kommt aus der Konfiguration (dlq.topic). */
+    private final String deadLetterTopicName;
+
+    /** Spring reicht den KafkaTemplate und den Topic-Namen herein. */
+    public DeadLetterPublisher(KafkaTemplate<String, String> kafkaTemplate,
+                               @Value("${dlq.topic}") String deadLetterTopicName) {
         this.kafkaTemplate = kafkaTemplate;
+        this.deadLetterTopicName = deadLetterTopicName;
     }
 
     /**
@@ -45,12 +50,12 @@ public class DeadLetterPublisher {
     public void publish(ConsumerRecord<String, String> original, String reason) {
         log.warn("Nachricht aus {} Partition {} Offset {} geht auf {}: {}",
                 original.topic(), original.partition(), original.offset(),
-                KafkaConfiguration.DEAD_LETTER_TOPIC_NAME, reason);
+                deadLetterTopicName, reason);
 
         // Schluessel und Wert bleiben genau so, wie sie ankamen - damit man die Nachricht spaeter
         // unveraendert anschauen oder nach einer Korrektur erneut einspielen kann.
         ProducerRecord<String, String> deadLetter = new ProducerRecord<>(
-                KafkaConfiguration.DEAD_LETTER_TOPIC_NAME, original.key(), original.value());
+                deadLetterTopicName, original.key(), original.value());
         byte[] reasonAsBytes = reason.getBytes(StandardCharsets.UTF_8);
         deadLetter.headers().add(REASON_HEADER, reasonAsBytes);
 
@@ -86,6 +91,6 @@ public class DeadLetterPublisher {
     private void logPublishFailure(ConsumerRecord<String, String> original) {
         log.error("Nachricht aus {} Partition {} Offset {} konnte nicht auf {} abgelegt werden - Paket wird wiederholt",
                 original.topic(), original.partition(), original.offset(),
-                KafkaConfiguration.DEAD_LETTER_TOPIC_NAME);
+                deadLetterTopicName);
     }
 }

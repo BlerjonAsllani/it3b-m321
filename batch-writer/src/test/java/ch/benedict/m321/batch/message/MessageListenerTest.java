@@ -187,6 +187,6 @@ class MessageListenerTest {
 
     /** Baut einen Topic-Eintrag, wie ihn Kafka dem Listener uebergibt. */
     private ConsumerRecord<String, String> recordWithValue(long offset, String value) {
-        return new ConsumerRecord<>("chat.messages", 0, offset, "11111111-1111-1111-1111-111111111111", value);
+        return new ConsumerRecord<>("chat.persist", 0, offset, "11111111-1111-1111-1111-111111111111", value);
     }
 }

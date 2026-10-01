@@ -3,7 +3,6 @@ package ch.benedict.m321.batch.message;
 import java.util.ArrayList;
 import java.util.List;
 
-import ch.benedict.m321.batch.kafka.KafkaConfiguration;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -41,7 +40,7 @@ public class MessageListener {
      * einzigen batchUpdate. Bestaetigt wird erst, wenn jede Nachricht des Pakets entweder
      * gespeichert oder auf dem Dead-Letter-Topic abgelegt ist.
      */
-    @KafkaListener(topics = KafkaConfiguration.TOPIC_NAME, groupId = KafkaConfiguration.GROUP_ID, batch = "true")
+    @KafkaListener(topics = "${chat.topic}", groupId = "${batch.group-id}", batch = "true")
     public void onMessages(List<ConsumerRecord<String, String>> records, Acknowledgment acknowledgment) {
         long startMillis = System.currentTimeMillis();
 

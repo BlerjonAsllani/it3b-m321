@@ -1,6 +1,7 @@
 package ch.benedict.m321.chat.kafka;
 
 import org.apache.kafka.clients.admin.NewTopic;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.kafka.config.TopicBuilder;
@@ -16,8 +17,12 @@ import org.springframework.kafka.config.TopicBuilder;
 @Configuration
 public class KafkaConfiguration {
 
-    /** Name des Topics, auf das jede neue Nachricht geschrieben wird. */
-    public static final String TOPIC_NAME = "chat.messages";
+    /**
+     * Name des Topics, auf das jede neue Nachricht geschrieben wird. Kommt aus der
+     * Konfiguration (chat.topic, im Compose aus der Umgebungsvariablen CHAT_TOPIC), damit der
+     * Stack andere Namen bekommen kann, ohne dass eine Zeile Code geaendert wird.
+     */
+    private final String topicName;
 
     /**
      * Wie viele Partitionen das Topic bekommt. Eine Partition ist ein Teilstueck des
@@ -29,6 +34,16 @@ public class KafkaConfiguration {
      */
     private static final int PARTITIONS = 6;
 
+    /** Spring reicht den Namen aus der Konfiguration herein. */
+    public KafkaConfiguration(@Value("${chat.topic}") String topicName) {
+        this.topicName = topicName;
+    }
+
+    /** Gibt den Topic-Namen an alle weiter, die auf dieses Topic schreiben. */
+    public String topicName() {
+        return topicName;
+    }
+
     /**
      * Meldet das Topic beim Broker an. Spring legt es beim Start automatisch an,
      * falls es noch nicht existiert - man muss auf der Kommandozeile nichts anlegen.
@@ -38,7 +53,7 @@ public class KafkaConfiguration {
      */
     @Bean
     public NewTopic chatTopic() {
-        return TopicBuilder.name(TOPIC_NAME)
+        return TopicBuilder.name(topicName)
                 .partitions(PARTITIONS)
                 .replicas(1)
                 .build();

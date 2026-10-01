@@ -10,12 +10,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 /**
- * Faehrt den ganzen batch-service hoch - aber mit angehaltenem Listener (auto-startup=false):
+ * Faehrt den ganzen batch-writer hoch - aber mit angehaltenem Listener (auto-startup=false):
  * der Test soll pruefen, dass alle Teile zusammenpassen, und nicht nebenbei echte Nachrichten
  * vom Topic lesen und in die Datenbank schreiben.
  */
 @SpringBootTest(properties = "spring.kafka.listener.auto-startup=false")
-class BatchServiceApplicationTest {
+class BatchWriterApplicationTest {
 
     @Autowired
     private NewTopic deadLetterTopic;
@@ -29,7 +29,7 @@ class BatchServiceApplicationTest {
      */
     @Test
     void kafkaBeansAreCreated() {
-        assertEquals("chat.messages-dlt", deadLetterTopic.name());
+        assertEquals("chat.dlq", deadLetterTopic.name());
         assertEquals(1, deadLetterTopic.numPartitions());
         assertEquals(1, deadLetterTopic.replicationFactor());
         assertNotNull(errorHandler);

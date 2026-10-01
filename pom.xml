@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!-- Der Spring-Boot-Eltern-POM legt die Versionen aller Spring-Bibliotheken fest. Dieser
+         POM erbt davon und gibt es an beide Dienste weiter - deshalb steht in den Modulen
+         unten bei den meisten Abhaengigkeiten keine Versionsnummer. -->
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.5.16</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>ch.benedict.m321</groupId>
+    <artifactId>chat-app</artifactId>
+    <version>0.1.0</version>
+    <packaging>pom</packaging>
+    <name>chat-app</name>
+    <description>Chat-App des Moduls M321: chat-service und batch-writer</description>
+
+    <!-- Beide Dienste als Module. Nur deshalb baut und testet "mvn clean test" im
+         Wurzelverzeichnis in EINEM Lauf beide Dienste. -->
+    <modules>
+        <module>chat-service</module>
+        <module>batch-writer</module>
+    </modules>
+
+    <properties>
+        <java.version>21</java.version>
+        <springdoc.version>2.9.0</springdoc.version>
+        <!-- Testcontainers startet im Test eine echte Datenbank und einen echten Broker.
+             Die Version verwaltet Spring Boot nicht, deshalb steht sie hier. -->
+        <testcontainers.version>1.21.3</testcontainers.version>
+    </properties>
+</project>

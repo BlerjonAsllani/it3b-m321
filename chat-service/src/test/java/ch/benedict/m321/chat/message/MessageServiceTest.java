@@ -47,8 +47,11 @@ class MessageServiceTest {
 
     private final MessageRepository messageRepository = mock(MessageRepository.class);
 
+    /** Denselben Topic-Namen, den die Anwendung aus chat.topic bekommt, reichen wir hier von Hand herein. */
+    private static final String TOPIC = "chat.persist";
+
     private final MessageService messageService =
-            new MessageService(kafkaTemplate, objectMapper, messageRepository);
+            new MessageService(kafkaTemplate, objectMapper, messageRepository, TOPIC);
 
     /**
      * Prueft, dass eine gesendete Nachricht mit der roomId als Kafka-Schluessel ankommt und
@@ -57,7 +60,7 @@ class MessageServiceTest {
     @Test
     void sendMessageWritesJsonWithRoomIdAsKey() throws Exception {
         RecordMetadata metadata = new RecordMetadata(
-                new TopicPartition("chat.messages", 0), 0L, 0, 0L, 0, 0);
+                new TopicPartition(TOPIC, 0), 0L, 0, 0L, 0, 0);
         SendResult<String, String> result = new SendResult<>(null, metadata);
         when(kafkaTemplate.send(anyString(), anyString(), anyString()))
                 .thenReturn(CompletableFuture.completedFuture(result));
@@ -71,7 +74,7 @@ class MessageServiceTest {
         ArgumentCaptor<String> valueCaptor = ArgumentCaptor.forClass(String.class);
         verify(kafkaTemplate).send(topicCaptor.capture(), keyCaptor.capture(), valueCaptor.capture());
 
-        assertEquals("chat.messages", topicCaptor.getValue());
+        assertEquals(TOPIC, topicCaptor.getValue());
         assertEquals(ROOM_ID.toString(), keyCaptor.getValue());
 
         JsonNode json = objectMapper.readTree(valueCaptor.getValue());

@@ -4,17 +4,17 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
 /**
- * Startpunkt des batch-service. Er hat keine Weboberflaeche: nach dem Start laufen nur die
+ * Startpunkt des batch-writer. Er hat keine Weboberflaeche: nach dem Start laufen nur die
  * Threads des Kafka-Listeners - und die halten den Prozess am Leben, bis man ihn beendet.
  */
 @SpringBootApplication
-public class BatchServiceApplication {
+public class BatchWriterApplication {
 
     /**
      * Uebergibt die Startklasse an Spring Boot. Alles Weitere - Datenbankverbindung,
      * Kafka-Listener, Konfigurationsdateien - erledigt der Aufruf darunter.
      */
     public static void main(String[] args) {
-        SpringApplication.run(BatchServiceApplication.class, args);
+        SpringApplication.run(BatchWriterApplication.class, args);
     }
 }

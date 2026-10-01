@@ -5,6 +5,11 @@ server:
     # (z. B. "text darf nicht leer sein") nicht an den Client, sondern nur den Statuscode.
     include-message: always
 
+# Name des Topics, auf das gesendet wird. Im Compose kommt der Wert aus der
+# Umgebungsvariablen CHAT_TOPIC; ohne sie gilt chat.persist.
+chat:
+  topic: ${CHAT_TOPIC:chat.persist}
+
 spring:
   application:
     name: chat-service

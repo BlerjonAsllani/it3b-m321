@@ -28,10 +28,13 @@ class DeadLetterPublisherTest {
 
     private final KafkaTemplate<String, String> kafkaTemplate = mock(KafkaTemplate.class);
 
-    private final DeadLetterPublisher publisher = new DeadLetterPublisher(kafkaTemplate);
+    /** Denselben Topic-Namen, den die Anwendung aus dlq.topic bekommt, reichen wir hier von Hand herein. */
+    private static final String DLQ_TOPIC = "chat.dlq";
+
+    private final DeadLetterPublisher publisher = new DeadLetterPublisher(kafkaTemplate, DLQ_TOPIC);
 
     private final ConsumerRecord<String, String> original =
-            new ConsumerRecord<>("chat.messages", 3, 42L, "11111111-1111-1111-1111-111111111111", "{kaputt");
+            new ConsumerRecord<>("chat.persist", 3, 42L, "11111111-1111-1111-1111-111111111111", "{kaputt");
 
     /**
      * Prueft, dass die Nachricht mit unveraendertem Schluessel und Wert auf dem Dead-Letter-Topic
@@ -48,7 +51,7 @@ class DeadLetterPublisherTest {
         verify(kafkaTemplate).send(recordCaptor.capture());
         ProducerRecord<?, ?> sent = recordCaptor.getValue();
 
-        assertEquals("chat.messages-dlt", sent.topic());
+        assertEquals(DLQ_TOPIC, sent.topic());
         assertEquals("11111111-1111-1111-1111-111111111111", sent.key());
         assertEquals("{kaputt", sent.value());
 

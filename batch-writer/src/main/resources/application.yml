@@ -1,6 +1,19 @@
+# Topics und Consumer-Gruppe. Im Compose kommen die Werte aus den Umgebungsvariablen
+# CHAT_TOPIC und DLQ_TOPIC; ohne sie gelten die Vorgaben darunter.
+chat:
+  topic: ${CHAT_TOPIC:chat.persist}
+dlq:
+  topic: ${DLQ_TOPIC:chat.dlq}
+batch:
+  # Alle Instanzen teilen sich diese Gruppe. Nur so bearbeitet jede Partition genau eine
+  # Instanz - mit eigenen Gruppen bekaeme jede Instanz jede Nachricht.
+  group-id: ${BATCH_GROUP_ID:batch-writer}
+  # Pause zwischen zwei Versuchen, wenn die Datenbank nicht erreichbar ist.
+  retry-interval-ms: ${RETRY_INTERVAL_MS:5000}
+
 spring:
   application:
-    name: batch-service
+    name: batch-writer
 
   # Verbindung zur Datenbank aus docker-compose.
   # Zugangsdaten stehen hier im Klartext, weil das eine Uebungsumgebung ist.
@@ -37,8 +50,8 @@ spring:
       value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       # Die drei Werte zusammen naehern "500 Stueck oder 200 ms" an (PLANUNG.md 2.3).
       # Startwerte - nachgemessen mit scripts/load-test.sh.
-      max-poll-records: 500
-      fetch-max-wait: 200ms
+      max-poll-records: ${BATCH_SIZE:500}
+      fetch-max-wait: ${BATCH_WAIT_MS:200}ms
       fetch-min-size: 100KB
     producer:
       # Nur fuer das Dead-Letter-Topic: Schluessel und Wert gehen unveraendert als Text weiter.
