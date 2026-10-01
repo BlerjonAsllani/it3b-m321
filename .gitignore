@@ -11,6 +11,9 @@ out/
 .project
 .settings/
 
+# Zugangsdaten: .env entsteht lokal aus .env.example und gehoert nicht ins Repository
+.env
+
 # macOS
 .DS_Store
 

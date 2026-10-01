@@ -1,35 +1,36 @@
-# Infrastruktur: Datenbank und Message Broker.
-# chat-service und batch-service laufen in dieser Phase noch auf dem Host (aus der IDE).
+# Der ganze Stack: Datenbank, Broker und beide Dienste im selben Netz.
+# Start:  cp .env.example .env && docker compose up -d --build
+#
+# KEIN Dienst veroeffentlicht einen Port auf den Host. Alles laeuft im Netz chat-net und ist
+# nur von innen erreichbar, zum Beispiel mit "docker compose exec".
 services:
 
   postgres:
     image: postgres:17-alpine
     container_name: m321-postgres
     environment:
-      POSTGRES_DB: chat
-      POSTGRES_USER: chat
-      POSTGRES_PASSWORD: chat
-    ports:
-      # Nur auf localhost veroeffentlicht (127.0.0.1), nicht auf allen Netzwerk-
-      # Schnittstellen: sonst waere die Datenbank (Zugang chat/chat) aus dem ganzen
-      # Schulnetz erreichbar. Veroeffentlicht wird trotzdem, weil der chat-service in
-      # diesem Bootstrap noch auf dem Host laeuft und die Datenbank so erreichen muss.
-      - "127.0.0.1:5432:5432"
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
-      # Alle .sql-Dateien hier drin fuehrt das Postgres-Image beim ERSTEN Start
-      # in alphabetischer Reihenfolge aus. Danach nie wieder.
+      # Alle .sql-Dateien hier drin fuehrt das Postgres-Image beim ERSTEN Start in
+      # alphabetischer Reihenfolge aus. Danach nie wieder.
       - ./db:/docker-entrypoint-initdb.d:ro
       - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # Die beiden Dienste starten erst, wenn die Datenbank wirklich antwortet - nicht schon,
+      # wenn der Container existiert. Die doppelten Dollarzeichen sorgen dafuer, dass Compose
+      # die Variablen stehen laesst und erst die Shell im Container sie einsetzt.
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
     networks:
       - chat-net
 
   kafka:
     image: apache/kafka:4.0.0
     container_name: m321-kafka
-    ports:
-      # Nur auf localhost veroeffentlicht, aus demselben Grund wie bei Postgres oben:
-      # sonst waere der Broker aus dem ganzen Schulnetz erreichbar.
-      - "127.0.0.1:9092:9092"
     environment:
       # --- KRaft: dieser eine Container ist Broker UND Controller zugleich ---
       KAFKA_NODE_ID: 1
@@ -37,15 +38,14 @@ services:
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
 
-      # Worauf der Broker HOERT (im Container).
+      # Worauf der Broker hoert (im Container).
       KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
 
-      # Welche Adresse der Broker den Clients NENNT: verbindet sich ein Client zu einer
-      # falschen oder nicht aufloesbaren Adresse, haengt er danach im Timeout, obwohl die
-      # erste Verbindung zum bootstrap-server geklappt hat - die haeufigste Fehlerquelle
-      # bei Kafka in Docker.
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      # Welche Adresse der Broker den Clients NENNT. Weil kein Port mehr nach aussen geht,
+      # ist das der Dienstname im Netz chat-net. Stuende hier localhost, wuerden chat-service
+      # und batch-writer nach der ersten Verbindung in den Timeout laufen.
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
 
       # Ein einzelner Broker kann nichts replizieren - daher ueberall 1.
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
@@ -53,15 +53,65 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       # Ohne das wartet die erste Consumer-Gruppe beim Start 3 Sekunden.
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-      # Topics entstehen nur ausdruecklich, ueber die NewTopic-Beans im chat-service und
-      # im batch-service. Ohne diese Zeile legt Kafka ein unbekanntes Topic still selbst an,
-      # sobald ein Client danach fragt - mit Standardwerten (1 Partition) statt unseren 6.
+      # Topics entstehen nur ausdruecklich ueber die NewTopic-Beans der Dienste. Ohne diese
+      # Zeile legt Kafka ein unbekanntes Topic still mit 1 Partition an statt mit unseren 6.
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
-      # Hier speichert Kafka Topics und die Offsets der Consumer-Gruppen. Der Ordner liegt
-      # auf dem Volume kafka-data - so ueberlebt beides ein "docker compose down".
+      # Hier speichert Kafka Topics und die Offsets der Consumer-Gruppen - auf dem Volume
+      # kafka-data, damit beides ein "docker compose down" ueberlebt.
       KAFKA_LOG_DIRS: /var/lib/kafka/data
     volumes:
       - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list > /dev/null 2>&1"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+    networks:
+      - chat-net
+
+  chat-service:
+    build:
+      # Gebaut wird aus dem Wurzelverzeichnis, weil der Eltern-POM dazugehoert.
+      context: .
+      dockerfile: chat-service/Dockerfile
+    container_name: m321-chat-service
+    environment:
+      # Innerhalb des Netzes heissen die beiden anderen Dienste schlicht postgres und kafka.
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      CHAT_TOPIC: ${CHAT_TOPIC}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    networks:
+      - chat-net
+
+  batch-writer:
+    build:
+      context: .
+      dockerfile: batch-writer/Dockerfile
+    # ABSICHTLICH ohne container_name: ein fester Name laesst sich nicht vervielfachen,
+    # "docker compose up -d --scale batch-writer=2" wuerde daran scheitern.
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB}?reWriteBatchedInserts=true
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      CHAT_TOPIC: ${CHAT_TOPIC}
+      DLQ_TOPIC: ${DLQ_TOPIC}
+      BATCH_SIZE: ${BATCH_SIZE}
+      BATCH_WAIT_MS: ${BATCH_WAIT_MS}
+      RETRY_INTERVAL_MS: ${RETRY_INTERVAL_MS}
+      BATCH_GROUP_ID: ${BATCH_GROUP_ID}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
     networks:
       - chat-net
 
