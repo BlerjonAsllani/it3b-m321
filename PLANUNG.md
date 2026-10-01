@@ -16,7 +16,7 @@ Keycloak, docker-compose, internes Docker-Netzwerk.
 | Desktop-UI | **JavaFX-Client** | Zweiter Client gegen dieselbe API, zeigt Client-Unabhängigkeit des Backends |
 | Login | **Keycloak** (OIDC) | Vorgabe |
 | Message Broker | **Apache Kafka** (KRaft-Modus, ohne ZooKeeper) | Industriell der Standard für Event-Streaming; Topics/Partitions/Consumer-Groups sind Lehrplan-Vokabular *(geändert — siehe Verlauf)* |
-| Datenbank | **PostgreSQL** | Standard, gut dokumentiert. Schreibzugriff ausschliesslich gebündelt über den `batch-service` *(änderbar)* |
+| Datenbank | **PostgreSQL** | Standard, gut dokumentiert. Schreibzugriff ausschliesslich gebündelt über den `batch-writer` *(änderbar)* |
 | Einstiegspunkt | **nginx** als Reverse Proxy | Einziger nach aussen offener Port |
 | Betrieb | **docker-compose**, ein internes Netzwerk `chat-net` | Vorgabe |
 
@@ -31,9 +31,9 @@ flowchart TB
     direction TB
     gw["gateway · nginx<br/><small>einziger offener Port</small>"]
     chat["chat-service<br/><small>REST · SSE · JWT-Prüfung</small>"]
-    batch["batch-service<br/><small>einziger Schreiber</small>"]
+    batch["batch-writer<br/><small>einziger Schreiber</small>"]
     kc["keycloak<br/><small>Login / OIDC</small>"]
-    kafka["kafka<br/><small>Topic chat.messages</small>"]
+    kafka["kafka<br/><small>Topic chat.persist</small>"]
     db[("postgres<br/><small>Nachrichten</small>")]
 
     gw -->|"/api · /stream"| chat
@@ -42,7 +42,7 @@ flowchart TB
     chat -->|"produce"| kafka
     chat -.->|"Verlauf LESEN"| db
     kafka -.->|"Consumer-Group je Instanz<br/>→ SSE"| chat
-    kafka -->|"Consumer-Group batch-service"| batch
+    kafka -->|"Consumer-Group batch-writer"| batch
     batch ==>|"Batch-INSERT<br/>500 Zeilen"| db
   end
 
@@ -71,7 +71,7 @@ Liefert das React-Bundle aus und leitet weiter:
 
 **chat-service** — das Backend aus der Skizze. Aufgaben:
 - REST-Endpunkt `POST /api/messages` — Nachricht entgegennehmen und **nur** auf das
-  Kafka-Topic `chat.messages` schreiben (Schlüssel: `roomId`). Es schreibt selbst **nicht** in die
+  Kafka-Topic `chat.persist` schreiben (Schlüssel: `roomId`). Es schreibt selbst **nicht** in die
   Datenbank.
 - `GET /api/messages?roomId=…` — Verlauf der letzten N Nachrichten aus der Datenbank **lesen**.
 - `GET /stream` — SSE-Verbindung. Der Service liest per `@KafkaListener` in einer **eigenen,
@@ -82,9 +82,9 @@ Liefert das React-Bundle aus und leitet weiter:
   Diese drei schreiben **direkt** in die Datenbank, ohne Kafka und ohne Bündeln (Abschnitt 2.4).
 - Prüft bei jedem Aufruf das JWT von Keycloak (OAuth2 Resource Server).
 
-**batch-service** — läuft ohne Web-Oberfläche und **genau einmal** (eine Instanz). Er ist der
+**batch-writer** — läuft ohne Web-Oberfläche und **genau einmal** (eine Instanz). Er ist der
 **einzige Dienst, der in die Nachrichtentabelle schreibt**:
-- Liest fortlaufend als Consumer-Gruppe `batch-service` vom Topic `chat.messages` und schreibt
+- Liest fortlaufend als Consumer-Gruppe `batch-writer` vom Topic `chat.persist` und schreibt
   **gebündelt** in die Datenbank (Details in Abschnitt 2.3). Das ist seine Hauptaufgabe.
 - Zusätzlich zeitgesteuert (`@Scheduled`): Nachrichten älter als 30 Tage archivieren bzw. löschen,
   nächtliche Statistik (Nachrichten pro Raum, aktive Nutzer) in eine Tabelle schreiben.
@@ -97,18 +97,18 @@ Liefert das React-Bundle aus und leitet weiter:
 3. `chat-service` prüft das Token und mit **einer lesenden** Abfrage auf `room_member`, ob der
    Absender Mitglied des Raums ist (gebaut in Teilprojekt 2). Dann vergibt es eine UUID und einen
    Zeitstempel und schreibt die Nachricht mit `roomId` als **Schlüssel** auf das Topic
-   `chat.messages`. Danach antwortet es dem Client. **Kein schreibender Datenbankzugriff im
-   Anfrageweg** — gespeichert wird ausschliesslich im `batch-service`.
+   `chat.persist`. Danach antwortet es dem Client. **Kein schreibender Datenbankzugriff im
+   Anfrageweg** — gespeichert wird ausschliesslich im `batch-writer`.
 4. Am Topic hängen zwei Arten von Consumer-Gruppen — Kafka liefert jeder eigenen Gruppe eine
    vollständige Kopie des Topics, das übernimmt die Rolle, die bei RabbitMQ ein Fanout-Exchange
    hatte:
    - `chat-live-<zufällige-id>` — eine **eigene, flüchtige** Gruppe pro `chat-service`-Instanz.
      Startet immer bei `auto.offset.reset: latest`, liest also nie den Verlauf, sondern nur, was
      ab jetzt eintrifft. Für die Anzeige.
-   - `batch-service` — eine einzige, **dauerhafte** Gruppe mit committeten Offsets. Für das
+   - `batch-writer` — eine einzige, **dauerhafte** Gruppe mit committeten Offsets. Für das
      Speichern.
 5. Jede `chat-service`-Instanz schiebt ihre Kopie sofort über SSE an ihre Clients.
-6. Der `batch-service` sammelt seine Kopien und schreibt sie gebündelt in PostgreSQL.
+6. Der `batch-writer` sammelt seine Kopien und schreibt sie gebündelt in PostgreSQL.
 
 Schritt 4 ist der Grund für Kafka statt eines einfachen Punkt-zu-Punkt-Aufrufs — gleich zweifach:
 **Verteilung** (bei zwei Backend-Instanzen sieht ein Nutzer an Instanz A auch Nachrichten von
@@ -123,18 +123,18 @@ sequenceDiagram
   participant K as kafka
   participant B as chat-service<br/>Instanz B
   participant C2 as Client B
-  participant BS as batch-service
+  participant BS as batch-writer
   participant DB as postgres
 
   C->>G: POST /api/messages + Bearer-Token
   G->>A: weiterleiten
   A->>A: Token prüfen, Mitgliedschaft lesen, UUID + Zeitstempel setzen
-  A->>K: send(topic=chat.messages, key=roomId)
+  A->>K: send(topic=chat.persist, key=roomId)
   A-->>C: 202 Accepted
   Note over K: jede Consumer-Gruppe<br/>bekommt eine eigene Kopie
   K-->>A: Gruppe chat-live-A
   K-->>B: Gruppe chat-live-B
-  K-->>BS: Gruppe batch-service
+  K-->>BS: Gruppe batch-writer
   A-->>C: SSE
   B-->>C2: SSE
   Note over BS: sammeln:<br/>bis zu 500 oder ~200 ms
@@ -149,7 +149,7 @@ sequenceDiagram
 einen Parse-Vorgang und einen eigenen Transaktions-Commit. Die Datenbank ist damit lange vor
 der Anwendung am Anschlag — und der Nutzer wartet beim Senden mit.
 
-**Die Lösung.** Der `batch-service` sammelt, was aus der Consumer-Gruppe `batch-service`
+**Die Lösung.** Der `batch-writer` sammelt, was aus der Consumer-Gruppe `batch-writer`
 hereinkommt, und schreibt in Paketen:
 
 | Regel | Wert | Warum |
@@ -185,7 +185,7 @@ Rechenbeispiel für die Klasse: 100 000 ÷ 500 = **200 Schreibvorgänge pro Seku
 | Absturz mitten im Paket → Nachrichten weg | **Offset-Commit erst nach dem erfolgreichen Schreiben.** Ohne Commit liest die Gruppe beim nächsten Poll ab derselben Stelle erneut. |
 | Erneute Zustellung → Nachricht doppelt in der DB | Die UUID kommt vom `chat-service` und ist der Primärschlüssel. `ON CONFLICT (id) DO NOTHING` verwirft die Dublette. |
 | Reihenfolge | Zwei Gründe gemeinsam: der Zeitstempel wird im `chat-service` gesetzt, nicht von der Datenbank — und **Kafka garantiert Reihenfolge innerhalb einer Partition**. Weil `roomId` der Schlüssel ist, landen alle Nachrichten eines Raums garantiert in derselben Partition und damit in Sendereihenfolge. Über Räume hinweg gibt es keine Ordnungsgarantie — das ist unproblematisch, weil Räume unabhängig sind. |
-| Datenbank kommt nicht nach | Der **Consumer-Lag** der Gruppe `batch-service` wächst — **sichtbar** über `kafka-consumer-groups.sh --describe --group batch-service` oder eine Kafka-UI. Genau das ist die Lehrstunde zu Backpressure. |
+| Datenbank kommt nicht nach | Der **Consumer-Lag** der Gruppe `batch-writer` wächst — **sichtbar** über `kafka-consumer-groups.sh --describe --group batch-writer` oder eine Kafka-UI. Genau das ist die Lehrstunde zu Backpressure. |
 
 **Der Preis, ehrlich benannt.** Eine gesendete Nachricht steht bis zu ~200 ms später in der
 Datenbank. Für die Anzeige spielt das keine Rolle — der SSE-Weg läuft völlig unabhängig und
@@ -198,9 +198,9 @@ ein Problem — das der Schreiblast. Es macht die App nicht automatisch skalierb
 
 ### 2.4 Rückstau: was passiert, wenn der Schreiber nicht nachkommt
 
-Der `batch-service` läuft **einmal**. Eine Instanz ist damit die Obergrenze für den Durchsatz —
+Der `batch-writer` läuft **einmal**. Eine Instanz ist damit die Obergrenze für den Durchsatz —
 schafft sie 200 Pakete pro Sekunde, ist bei 100 000 Nachrichten pro Sekunde Schluss. Wird mehr
-gesendet als geschrieben, wächst der **Consumer-Lag** der Gruppe `batch-service` — das ist kein
+gesendet als geschrieben, wächst der **Consumer-Lag** der Gruppe `batch-writer` — das ist kein
 Fehler, das ist die Aufgabe eines Logs, das schneller geschrieben als gelesen werden darf. Drei
 Fälle muss man aber auseinanderhalten, und hier unterscheidet sich Kafka am deutlichsten von
 RabbitMQ:
@@ -208,24 +208,24 @@ RabbitMQ:
 | Fall | Was passiert | Was wir tun |
 |---|---|---|
 | **Kurzer Rückstau** — eine Lastspitze | Lag wächst und baut sich wieder ab | Nichts. Genau dafür ist der Puffer da. |
-| **Dauerhafter Rückstau** — Datenbank langsam oder weg | Lag wächst unbegrenzt weiter | **Kafka blockiert `chat-service` beim Senden nicht von sich aus** — anders als RabbitMQ hat ein Topic keine Speichergrenze, die den Produzenten bremst. Der Log wächst, solange `retention.ms`/`retention.bytes` es zulassen. Ohne eigenes Zutun laufen alte, noch nicht gespeicherte Nachrichten irgendwann aus der Retention und sind **verloren** — genau das, was wir bei RabbitMQ ausdrücklich ausschliessen wollten. Der `batch-service` selbst wiederholt das Paket bei nicht erreichbarer Datenbank alle 5 Sekunden ohne Ende und bestätigt nichts — der Lag wächst sichtbar, auf seiner Seite geht nichts verloren. |
-| **Giftnachricht** — eine einzelne Nachricht lässt sich nie schreiben | Ohne Offset-Commit liest der Consumer dieselbe Nachricht immer wieder | Der `batch-service` legt sie auf das Topic `chat.messages-dlt` (Grund im Header `error-reason`) und bestätigt. Kaputtes JSON geht sofort dorthin, eine von der Datenbank abgelehnte Zeile nach dem Einzelweg (siehe unten). Keine Wiederholungsschleife: diese Nachricht wird nie speicherbar. |
+| **Dauerhafter Rückstau** — Datenbank langsam oder weg | Lag wächst unbegrenzt weiter | **Kafka blockiert `chat-service` beim Senden nicht von sich aus** — anders als RabbitMQ hat ein Topic keine Speichergrenze, die den Produzenten bremst. Der Log wächst, solange `retention.ms`/`retention.bytes` es zulassen. Ohne eigenes Zutun laufen alte, noch nicht gespeicherte Nachrichten irgendwann aus der Retention und sind **verloren** — genau das, was wir bei RabbitMQ ausdrücklich ausschliessen wollten. Der `batch-writer` selbst wiederholt das Paket bei nicht erreichbarer Datenbank alle 5 Sekunden ohne Ende und bestätigt nichts — der Lag wächst sichtbar, auf seiner Seite geht nichts verloren. |
+| **Giftnachricht** — eine einzelne Nachricht lässt sich nie schreiben | Ohne Offset-Commit liest der Consumer dieselbe Nachricht immer wieder | Der `batch-writer` legt sie auf das Topic `chat.dlq` (Grund im Header `error-reason`) und bestätigt. Kaputtes JSON geht sofort dorthin, eine von der Datenbank abgelehnte Zeile nach dem Einzelweg (siehe unten). Keine Wiederholungsschleife: diese Nachricht wird nie speicherbar. |
 
 **Der ehrliche Unterschied zu RabbitMQ, ausdrücklich benannt.** RabbitMQ bremst überlastete
 Producer automatisch (*Flow Control*) — Kafka nicht. Um dieselbe Garantie zu bekommen («lieber
 sichtbar blockieren als still Nachrichten verlieren»), müsste `chat-service` den Consumer-Lag von
-`batch-service` selbst beobachten (Kafka `AdminClient`, `describeConsumerGroups`) und
+`batch-writer` selbst beobachten (Kafka `AdminClient`, `describeConsumerGroups`) und
 `POST /api/messages` ab einer Lag-Schwelle mit `503` ablehnen. Das ist **nicht eingebaut** und
 noch nicht gebaut — siehe offener Punkt in Abschnitt 4. Bis dahin ist eine grosszügige Retention
-auf `chat.messages` (z. B. 7 Tage) die einzige Absicherung: sie verschafft Zeit, verhindert den
-Datenverlust aber nicht endgültig. Aktuell läuft `chat.messages` mit der Standard-Retention des
+auf `chat.persist` (z. B. 7 Tage) die einzige Absicherung: sie verschafft Zeit, verhindert den
+Datenverlust aber nicht endgültig. Aktuell läuft `chat.persist` mit der Standard-Retention des
 Brokers (Kafka-Standard: 7 Tage); bewusst festgelegt wird sie erst in Teilprojekt 4.
 
 **Dieselbe Nachricht, zwei Consumer-Strategien, gegensätzliche Regeln.**
 
 | Consumer-Gruppe | Wofür | Verhalten |
 |---|---|---|
-| `batch-service` | den Verlauf **speichern** | Dauerhaft, committete Offsets, nichts wird übersprungen. Holt nach einem Neustart genau dort weiter, wo sie aufgehört hat. |
+| `batch-writer` | den Verlauf **speichern** | Dauerhaft, committete Offsets, nichts wird übersprungen. Holt nach einem Neustart genau dort weiter, wo sie aufgehört hat. |
 | `chat-live-<instanz>` | jetzt **anzeigen** | Flüchtig, `auto.offset.reset: latest`, keine committeten Offsets. Startet nach jedem Neustart wieder bei «jetzt» — eine 30 Sekunden alte «Live»-Nachricht nachzuliefern wäre ohnehin wertlos. Wer etwas verpasst hat, holt es mit `GET /api/messages` nach. |
 
 Das ist die Lehrstunde dieses Abschnitts, nur mit anderem Mechanismus als bei RabbitMQ: Wie man
@@ -235,11 +235,11 @@ gerade braucht. Bei RabbitMQ war das eine Frage der Queue-Konfiguration (`x-max-
 (committete vs. nie committete Offsets).
 
 **Ein Haken, der zum Bündeln gehört.** Lehnt die Datenbank eine einzige Zeile ab, scheitert das
-ganze `batchUpdate` — alle 500. Antwort darauf: der `batch-service` schreibt dieses eine Paket dann
+ganze `batchUpdate` — alle 500. Antwort darauf: der `batch-writer` schreibt dieses eine Paket dann
 **einmalig Zeile für Zeile**. Nur die wirklich schuldige Zeile geht auf das Dead-Letter-Topic, die
 restlichen 499 sind gespeichert; schon geschriebene Zeilen überspringt `ON CONFLICT`. Spring Kafkas
 `@RetryableTopic` wäre hier keine Lösung: es wird für Batch-Listener gar nicht unterstützt (siehe
-Nachtrag «batch-service»).
+Nachtrag «batch-writer»).
 
 ### 2.5 Login-Ablauf (Keycloak)
 
@@ -284,7 +284,7 @@ sequenceDiagram
 services:
   gateway:       { ports: ["8080:80"], networks: [chat-net] }   # einziger offener Port
   chat-service:  { expose: ["8080"],   networks: [chat-net] }
-  batch-service: {                     networks: [chat-net] }
+  batch-writer: {                     networks: [chat-net] }
   keycloak:      { expose: ["8080"],   networks: [chat-net] }
   kafka:         { expose: ["9092"],   networks: [chat-net] }   # KRaft-Modus, kein ZooKeeper-Container
   postgres:      { expose: ["5432"],   networks: [chat-net] }
@@ -358,11 +358,11 @@ Gespeichert wird nur der Benutzername als Absender.
    `fetch.min.bytes: 100 KB`. Die Startwerte haben sich bewährt; andere Werte wurden nicht
    ausprobiert. Erneut nachmessen, sobald die Dienste im Compose laufen (Teilprojekt 4).
 4. **Kein automatisches Backpressure auf den Sender.** Anders als RabbitMQ blockiert Kafka
-   `chat-service` beim Senden nicht von sich aus, wenn `batch-service` dauerhaft nicht nachkommt
+   `chat-service` beim Senden nicht von sich aus, wenn `batch-writer` dauerhaft nicht nachkommt
    (Abschnitt 2.4). Um «sichtbar blockieren statt still verlieren» zu erreichen, müsste
-   `chat-service` den Consumer-Lag von `batch-service` selbst prüfen und ab einer Schwelle mit
+   `chat-service` den Consumer-Lag von `batch-writer` selbst prüfen und ab einer Schwelle mit
    `503` antworten. **Noch nicht gebaut.**
-5. **Einzelweg nach einem fehlgeschlagenen Paket** — erledigt im `batch-service` (Teilprojekt 1,
+5. **Einzelweg nach einem fehlgeschlagenen Paket** — erledigt im `batch-writer` (Teilprojekt 1,
    Abschnitt 2.4).
 6. **Existiert der eingeladene Benutzername überhaupt?** Beim Einladen prüfen wir vorerst
    **nicht** gegen Keycloak. Ein Tippfehler legt dann eine Mitgliedschaft für jemanden an, den
@@ -388,8 +388,8 @@ Gespeichert wird nur der Benutzername als Absender.
 ## 5. Nächste Schritte
 
 Umgesetzt: Infrastruktur (Postgres, Kafka mit Volume), `chat-service` mit Lesen und Senden
-(`docs/plan/2026-09-04-chat-service-bootstrap.md`), `batch-service` mit Einzel- und Paketstufe
-(`docs/plan/2026-09-11-batch-service.md`).
+(`docs/plan/2026-09-04-chat-service-bootstrap.md`), `batch-writer` mit Einzel- und Paketstufe
+(`docs/plan/2026-09-11-batch-writer.md`).
 
 Weiter in dieser Reihenfolge (entschieden am 2026-09-11), jedes Teilprojekt mit eigenem Design,
 Plan und Umsetzung:
@@ -399,10 +399,10 @@ Plan und Umsetzung:
 2. **Live-Anzeige per SSE** — `GET /stream`, jede `chat-service`-Instanz mit eigener, flüchtiger
    Consumer-Gruppe (`auto.offset.reset: latest`).
 3. **Gateway und React-Oberfläche** — nginx als einziger offener Port; `chat-service` und
-   `batch-service` wandern ins Compose, die veröffentlichten Ports werden zu `expose`, und die
-   Retention von `chat.messages` bewusst festlegen.
+   `batch-writer` wandern ins Compose, die veröffentlichten Ports werden zu `expose`, und die
+   Retention von `chat.persist` bewusst festlegen.
 4. **Keycloak-Login** — Realm-Import, Token-Prüfung, Absender aus dem Token statt aus dem Request.
-5. **Zeitgesteuerte Aufgaben** im `batch-service` (Archivierung, Statistik) und **JavaFX-Client**.
+5. **Zeitgesteuerte Aufgaben** im `batch-writer` (Archivierung, Statistik) und **JavaFX-Client**.
 
 ---
 
@@ -454,7 +454,7 @@ Plan und Umsetzung:
 ### Was ich ohne Rückfrage entschieden habe
 
 PostgreSQL als Datenbank, Spring Boot als Framework, ein Topic statt getrennter Themen pro
-Zweck, und die Aufgaben des batch-service. Alles ist ohne Umbau der Architektur austauschbar —
+Zweck, und die Aufgaben des batch-writer. Alles ist ohne Umbau der Architektur austauschbar —
 darum keine Frage, sondern eine Festlegung, die man überstimmen kann.
 
 ### Nachtrag — Diagramme
@@ -473,7 +473,7 @@ hat diesen Weg gekippt: 100 000 einzelne `INSERT`-Anweisungen pro Sekunde sind k
 Datenbankproblem mehr, sondern ein Architekturfehler.
 
 **Was sich geändert hat:** der `chat-service` schreibt gar nicht mehr. Er publiziert nur noch,
-und der `batch-service` — bisher nur ein nächtlicher Aufräumdienst — ist zum einzigen Schreiber
+und der `batch-writer` — bisher nur ein nächtlicher Aufräumdienst — ist zum einzigen Schreiber
 geworden und bündelt (Abschnitt 2.3). Damit hat der Broker eine zweite Aufgabe bekommen: er
 verteilt nicht nur, er entkoppelt auch die Anzeige von der Datenbank.
 
@@ -481,7 +481,7 @@ verteilt nicht nur, er entkoppelt auch die Anzeige von der Datenbank.
 
 | Verworfen | Grund |
 |---|---|
-| `chat-service` schreibt einzeln, `batch-service` räumt nur auf | Genau der Fall, den die Vorgabe ausschliesst |
+| `chat-service` schreibt einzeln, `batch-writer` räumt nur auf | Genau der Fall, den die Vorgabe ausschliesst |
 | Sammelpuffer im `chat-service` selbst | Bei mehreren Instanzen schreiben mehrere Dienste gleichzeitig; ausserdem ist der Puffer bei einem Neustart weg, weil er nicht dauerhaft gespeichert ist |
 | Nur nach Anzahl bündeln (ohne Zeitlimit) | Bei wenig Betrieb bleiben Nachrichten beliebig lange liegen |
 | Nur nach Zeit bündeln (ohne Obergrenze) | Bei einem Lastspitze wird ein einzelnes Paket beliebig gross |
@@ -500,7 +500,7 @@ Drei offene Punkte wurden entschieden, zwei davon per Vorgabe, einer auf meinen 
 
 **Vorgegeben:**
 
-- **Der `batch-service` läuft vorerst genau einmal.** Damit ist die Frage nach Competing
+- **Der `batch-writer` läuft vorerst genau einmal.** Damit ist die Frage nach Competing
   Consumers vom Tisch — und ehrlicherweise ist eine Instanz die saubere Reihenfolge zum Lernen:
   erst sehen, wo die Grenze einer Instanz liegt, dann über eine zweite reden.
 - **Räume legt ein Nutzer selbst an und lädt per Benutzername ein.** Ich habe daraus die
@@ -558,7 +558,7 @@ Argument stand schon in der ursprünglichen Entscheidung als Gegenposition (Absc
 umentschieden wurde").
 
 **Warum das mehr war als Namen ersetzen.** RabbitMQ und Kafka bilden dieselbe Rolle im System —
-ein Broker zwischen `chat-service` und `batch-service` — mit **unterschiedlichen Bausteinen**
+ein Broker zwischen `chat-service` und `batch-writer` — mit **unterschiedlichen Bausteinen**
 ab. Exchange/Queue/ACK lassen sich nicht 1:1 auf Topic/Partition/Offset übertragen, deshalb wurde
 Abschnitt 2 neu durchdacht, nicht nur umbenannt:
 
@@ -566,17 +566,17 @@ Abschnitt 2 neu durchdacht, nicht nur umbenannt:
 |---|---|---|
 | Ein Fanout-Exchange verteilt an alle gebundenen Queues | Ein Topic verteilt automatisch eine volle Kopie an jede **eigene Consumer-Gruppe** | Aus zwei Queue-Typen (`chat.live.*`, `chat.persist`) wird **ein** Topic mit zwei Consumer-Gruppen-Strategien — eine Vereinfachung |
 | `chat.live.<instanz>` mit `x-max-length`/TTL, damit Alt-Nachrichten verworfen werden | Flüchtige Consumer-Gruppe je Instanz, `auto.offset.reset: latest`, nie committete Offsets | Statt Nachrichten aktiv zu verwerfen, werden sie strukturell nie zweimal gelesen — kein Wegwerf-Mechanismus mehr nötig |
-| `chat.persist` als dauerhafte Queue, ACK erst nach Commit | Dauerhafte Consumer-Gruppe `batch-service`, Offset-Commit erst nach Commit | Gleiches Prinzip, andere Mechanik |
+| `chat.persist` als dauerhafte Queue, ACK erst nach Commit | Dauerhafte Consumer-Gruppe `batch-writer`, Offset-Commit erst nach Commit | Gleiches Prinzip, andere Mechanik |
 | RabbitMQ bremst überlastete Producer automatisch (Flow Control) | **Kein eingebautes Gegenstück.** Kafka ist ein retention-basierter Log, kein grössenbegrenzter Speicher, der den Sender bremst | Echter Funktionsverlust — siehe unten |
-| Quorum-Queue mit `x-delivery-limit`, Dead-Letter-Queue | `@RetryableTopic` (nicht-blockierende Wiederholung) mit Dead-Letter-**Topic** (später ersetzt, siehe Nachtrag «batch-service») | Vergleichbares Ergebnis, anderer Baustein |
+| Quorum-Queue mit `x-delivery-limit`, Dead-Letter-Queue | `@RetryableTopic` (nicht-blockierende Wiederholung) mit Dead-Letter-**Topic** (später ersetzt, siehe Nachtrag «batch-writer») | Vergleichbares Ergebnis, anderer Baustein |
 | Reihenfolge nur über den vom Sender gesetzten Zeitstempel | Zusätzlich: Kafka garantiert Reihenfolge **innerhalb einer Partition** — `roomId` als Schlüssel sichert Reihenfolge pro Raum strukturell | Eine echte Verbesserung gegenüber der RabbitMQ-Fassung |
 
 **Was ehrlich schlechter geworden ist, nicht nur anders.** Der wichtigste Punkt: RabbitMQs
 automatische Flow Control — «Sender wird gebremst, `POST /api/messages` antwortet mit 503, statt
 dass irgendwo still Nachrichten verloren gehen» — hat **kein eingebautes Kafka-Gegenstück**. Ein
-Topic wächst gemäss Retention weiter, unabhängig davon, ob `batch-service` mitkommt. Das ist als
+Topic wächst gemäss Retention weiter, unabhängig davon, ob `batch-writer` mitkommt. Das ist als
 neuer offener Punkt Nr. 4 aufgenommen, nicht stillschweigend übergangen: um dieselbe Garantie zu
-bekommen, muss `chat-service` künftig selbst den Consumer-Lag von `batch-service` prüfen und ab
+bekommen, muss `chat-service` künftig selbst den Consumer-Lag von `batch-writer` prüfen und ab
 einer Schwelle ablehnen. Bis das gebaut ist, schützt nur eine grosszügige Retention-Zeit vor
 Datenverlust — und auch die nur vorübergehend.
 
@@ -588,7 +588,7 @@ aber näher an dem, was in echten Kafka-Systemen tatsächlich gemacht wird.
 
 **Was gleich geblieben ist.** UUID und Zeitstempel weiterhin vom `chat-service` gesetzt,
 `ON CONFLICT (id) DO NOTHING` zur Deduplizierung, `JdbcTemplate.batchUpdate` zum Schreiben, genau
-eine `batch-service`-Instanz, das gesamte Datenmodell (Abschnitt 3), die Raumverwaltung, der
+eine `batch-writer`-Instanz, das gesamte Datenmodell (Abschnitt 3), die Raumverwaltung, der
 Login-Ablauf über Keycloak (Abschnitt 2.5) und die Docker-Netzwerk-Regeln. Der Wechsel betrifft
 ausschliesslich den Broker und alles, was direkt an seinen Bausteinen hängt.
 
@@ -601,21 +601,21 @@ ausschliesslich den Broker und alles, was direkt an seinen Bausteinen hängt.
 | ZooKeeper mit einplanen | Modernes Kafka läuft im KRaft-Modus ohne ZooKeeper — ein Container weniger im Compose |
 
 **Was ich ohne Rückfrage festgelegt habe:** die Aufteilung in eine flüchtige Gruppe pro Instanz
-(Live-Anzeige) und eine dauerhafte Gruppe (`batch-service`), `roomId` als Partitionsschlüssel,
+(Live-Anzeige) und eine dauerhafte Gruppe (`batch-writer`), `roomId` als Partitionsschlüssel,
 und den Umgang mit Giftnachrichten über `@RetryableTopic` (später ersetzt, siehe Nachtrag
-«batch-service»). Alle drei sind ohne Umbau der Architektur änderbar.
+«batch-writer»). Alle drei sind ohne Umbau der Architektur änderbar.
 
-### Nachtrag — batch-service (Teilprojekt 1)
+### Nachtrag — batch-writer (Teilprojekt 1)
 
-Der `batch-service` ist gebaut, nach dem Design
-`docs/superpowers/specs/2026-09-11-batch-service-design.md` und dem Plan
-`docs/plan/2026-09-11-batch-service.md`. Drei Punkte dieses Dokuments haben sich dabei geändert:
+Der `batch-writer` ist gebaut, nach dem Design
+`docs/superpowers/specs/2026-09-11-batch-writer-design.md` und dem Plan
+`docs/plan/2026-09-11-batch-writer.md`. Drei Punkte dieses Dokuments haben sich dabei geändert:
 
 - **Die Raumprüfung beim Senden ist erlaubt.** Abschnitt 2.2 verbot «Datenbank im Anfrageweg»,
   Abschnitt 3 verlangte eine Abfrage auf `room_member` beim Senden — ein Widerspruch. Entschieden:
   gemeint war nur **schreibender** Zugriff. Eine lesende, per Index schnelle Abfrage ist erlaubt und
   verhindert, dass jemand in fremde oder nicht existierende Räume schreibt. Gebaut wird sie in
-  Teilprojekt 2; bis dahin fängt der `batch-service` Nachrichten für unbekannte Räume über das
+  Teilprojekt 2; bis dahin fängt der `batch-writer` Nachrichten für unbekannte Räume über das
   Dead-Letter-Topic ab — und behält das auch danach als Sicherheitsnetz.
 - **`@RetryableTopic` war falsch.** Spring Kafka unterstützt die nicht-blockierende Wiederholung
   nicht für Batch-Listener. Ersetzt durch eigenen, lesbaren Code: drei Fehlerklassen (kaputte
@@ -629,7 +629,7 @@ etwa 12 500–14 300 Nachrichten/s — rund 15-mal schneller; die Datenbank ist 
 Engpass.
 
 **Bei der Handprüfung aufgefallen:** Bei nicht erreichbarer Datenbank wiederholte der
-`batch-service` zwar korrekt und verlor nichts, schrieb aber keine einzige Zeile ins Log — Spring
+`batch-writer` zwar korrekt und verlor nichts, schrieb aber keine einzige Zeile ins Log — Spring
 wiederholt still, man sah den Ausfall nur am Lag. Das Design verlangte eine `ERROR`-Zeile pro
 Versuch; sie ist nachgerüstet («Datenbankfehler (…: …) - Paket mit … Nachrichten wird
 wiederholt») — und gilt seit der Schlussprüfung für jeden Datenbankfehler, nicht nur für eine nicht
