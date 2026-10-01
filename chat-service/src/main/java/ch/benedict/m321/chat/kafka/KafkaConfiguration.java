@@ -12,7 +12,7 @@ import org.springframework.kafka.config.TopicBuilder;
  * Ein Topic ist ein fortlaufendes Protokoll (ein "Log"), in das geschrieben wird.
  * Jede Consumer-Gruppe, die es liest, bekommt eine EIGENE vollstaendige Kopie und
  * merkt sich selbst, wie weit sie gekommen ist. Genau das brauchen wir: eine Kopie
- * fuer jede chat-service-Instanz (Anzeige) und eine fuer den batch-service (Speichern).
+ * fuer jede chat-service-Instanz (Anzeige) und eine fuer den batch-writer (Speichern).
  */
 @Configuration
 public class KafkaConfiguration {

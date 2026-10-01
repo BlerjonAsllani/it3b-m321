@@ -73,11 +73,11 @@ public class MessageService {
      * Nimmt eine neue Nachricht an und gibt sie an Kafka weiter.
      *
      * Wichtig: hier wird NICHT in die Datenbank geschrieben. Der chat-service
-     * publiziert nur; gespeichert wird spaeter gebuendelt vom batch-service
+     * publiziert nur; gespeichert wird spaeter gebuendelt vom batch-writer
      * (PLANUNG.md, Abschnitt 2.3).
      */
     public Message sendMessage(NewMessage incoming) {
-        // Die ID vergeben WIR, nicht die Datenbank. Nur so kann der batch-service
+        // Die ID vergeben WIR, nicht die Datenbank. Nur so kann der batch-writer
         // ein Paket gefahrlos wiederholen, ohne Dubletten zu erzeugen.
         UUID id = UUID.randomUUID();
 

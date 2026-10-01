@@ -95,8 +95,8 @@ public class MessageController {
     @Operation(
             summary = "Nachricht senden",
             description = "Nimmt eine Nachricht an und schreibt sie auf das Kafka-Topic "
-                        + "'chat.messages'. Die Antwort kommt, sobald Kafka den Empfang bestaetigt "
-                        + "hat. Gespeichert wird die Nachricht kurz danach vom batch-service - sie "
+                        + "'chat.persist'. Die Antwort kommt, sobald Kafka den Empfang bestaetigt "
+                        + "hat. Gespeichert wird die Nachricht kurz danach vom batch-writer - sie "
                         + "erscheint also erst mit kleiner Verzoegerung im Verlauf.")
     @ApiResponse(responseCode = "202", description = "Nachricht angenommen und auf das Topic geschrieben")
     @ApiResponse(responseCode = "400", description = "roomId fehlt, sender fehlt oder ist zu lang, Text leer oder laenger als 2000 Zeichen")

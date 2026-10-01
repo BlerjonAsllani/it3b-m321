@@ -75,7 +75,7 @@ class MessageControllerTest {
                 """;
 
         // 202 Accepted heisst: angenommen und weitergegeben - aber noch nicht gespeichert.
-        // Genau das ist bei uns der Fall, denn schreiben wird spaeter der batch-service.
+        // Genau das ist bei uns der Fall, denn schreiben wird spaeter der batch-writer.
         mockMvc.perform(post("/api/messages")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))

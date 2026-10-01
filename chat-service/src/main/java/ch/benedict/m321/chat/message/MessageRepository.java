@@ -18,7 +18,7 @@ import org.springframework.stereotype.Repository;
  * Zeile vorlesen.
  *
  * Schreiben gibt es hier absichtlich nicht. In die Nachrichtentabelle schreibt
- * ausschliesslich der batch-service (siehe PLANUNG.md, Abschnitt 2.3).
+ * ausschliesslich der batch-writer (siehe PLANUNG.md, Abschnitt 2.3).
  */
 @Repository
 public class MessageRepository {
