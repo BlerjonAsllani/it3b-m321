@@ -8,26 +8,48 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.jdbc.JdbcTest;
+import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.context.annotation.Import;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.junit.jupiter.Container;
+import org.testcontainers.junit.jupiter.Testcontainers;
+import org.testcontainers.utility.MountableFile;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
- * Prueft das SQL gegen die echte Datenbank aus docker-compose. @JdbcTest startet nur den
- * Datenbankteil von Spring (kein Kafka) und rollt nach jedem Test alles zurueck - die
- * Testzeilen bleiben also nicht in der Datenbank liegen. Replace.NONE heisst: die Datenbank
- * aus application.yml verwenden, keine eingebaute Test-Datenbank.
+ * Prueft das SQL gegen eine echte PostgreSQL-Datenbank, die der Test selbst in Docker startet
+ * (Testcontainers) - der Test braucht also keinen laufenden docker-compose-Stack. @JdbcTest
+ * startet nur den Datenbankteil von Spring (kein Kafka) und rollt nach jedem Test alles zurueck.
+ * Replace.NONE heisst: keine eingebaute Test-Datenbank verwenden, sondern die echte aus dem Container.
  */
 @JdbcTest
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
+@Testcontainers
 @Import(MessageWriter.class)
 class MessageWriterIntegrationTest {
 
     /** Der Demo-Raum aus db/02-demo-data.sql - er existiert in jeder frischen Datenbank. */
     private static final UUID DEMO_ROOM_ID = UUID.fromString("11111111-1111-1111-1111-111111111111");
+
+    /**
+     * Die Datenbank fuer diese Testklasse: ein PostgreSQL-Container, den Testcontainers vor dem
+     * ersten Test startet und nach dem letzten wieder loescht. Die beiden SQL-Dateien aus db/
+     * werden in den Ordner kopiert, den das Postgres-Image beim ersten Start selbst ausfuehrt -
+     * genau wie in docker-compose. Der Pfad beginnt mit "..", weil Maven im Ordner batch-writer
+     * laeuft und db/ eine Ebene darueber liegt. @ServiceConnection traegt die Adresse des
+     * Containers als Datenbankverbindung in Spring ein, die URL aus application.yml gilt nicht.
+     */
+    @Container
+    @ServiceConnection
+    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:17-alpine")
+            .withCopyFileToContainer(MountableFile.forHostPath("../db/01-schema.sql"),
+                    "/docker-entrypoint-initdb.d/01-schema.sql")
+            .withCopyFileToContainer(MountableFile.forHostPath("../db/02-demo-data.sql"),
+                    "/docker-entrypoint-initdb.d/02-demo-data.sql");
 
     @Autowired
     private MessageWriter messageWriter;

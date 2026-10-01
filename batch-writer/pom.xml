@@ -52,6 +52,37 @@
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
         </dependency>
+
+        <!-- Testcontainers: startet im Test eine echte Datenbank und einen echten Broker in Docker.
+             Die Versionen verwaltet Spring Boot, deshalb steht hier keine Versionsnummer. -->
+
+        <!-- Verbindet die Container mit Spring: @ServiceConnection setzt die Adressen automatisch. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-testcontainers</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- Verbindet die Container mit JUnit: @Testcontainers und @Container starten und stoppen sie. -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- Der PostgreSQL-Container fuer die Datenbank-Tests. -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- Der Kafka-Container fuer die Tests mit echtem Broker. -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>kafka</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>

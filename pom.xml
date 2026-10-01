@@ -31,8 +31,5 @@
     <properties>
         <java.version>21</java.version>
         <springdoc.version>2.9.0</springdoc.version>
-        <!-- Testcontainers startet im Test eine echte Datenbank und einen echten Broker.
-             Die Version verwaltet Spring Boot nicht, deshalb steht sie hier. -->
-        <testcontainers.version>1.21.3</testcontainers.version>
     </properties>
 </project>

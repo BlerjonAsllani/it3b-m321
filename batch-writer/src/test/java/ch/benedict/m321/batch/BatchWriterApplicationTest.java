@@ -10,11 +10,16 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 /**
- * Faehrt den ganzen batch-writer hoch - aber mit angehaltenem Listener (auto-startup=false):
- * der Test soll pruefen, dass alle Teile zusammenpassen, und nicht nebenbei echte Nachrichten
- * vom Topic lesen und in die Datenbank schreiben.
+ * Faehrt den ganzen batch-writer hoch - aber mit angehaltenem Listener (auto-startup=false) und
+ * ohne Kafka-Verbindung: der Test soll nur pruefen, dass alle Teile zusammenpassen. Deshalb
+ * legt auto-create=false das Dead-Letter-Topic beim Start nicht an (das braeuchte einen
+ * laufenden Broker) und der Test laeuft auch ohne Docker. Mit echtem Broker und echter
+ * Datenbank arbeiten die Szenario-Tests.
  */
-@SpringBootTest(properties = "spring.kafka.listener.auto-startup=false")
+@SpringBootTest(properties = {
+        "spring.kafka.listener.auto-startup=false",
+        "spring.kafka.admin.auto-create=false"
+})
 class BatchWriterApplicationTest {
 
     @Autowired
