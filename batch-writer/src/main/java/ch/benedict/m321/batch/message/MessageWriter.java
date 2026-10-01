@@ -6,12 +6,13 @@ import java.util.List;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
 /**
  * Schreibt Nachrichten in die Tabelle message. Nur SQL, keine Entscheidungen: was bei einem
- * Fehler passiert, entscheidet der Listener. Der batch-service ist der einzige Dienst, der in
+ * Fehler passiert, entscheidet der Listener. Der batch-writer ist der einzige Dienst, der in
  * diese Tabelle schreibt (PLANUNG.md, Abschnitt 2.1).
  */
 @Repository
@@ -57,7 +58,18 @@ public class MessageWriter {
             Object[] values = toColumnValues(message);
             allValues.add(values);
         }
-        jdbcTemplate.batchUpdate(INSERT_SQL, allValues);
+        try {
+            jdbcTemplate.batchUpdate(INSERT_SQL, allValues);
+        } catch (AssertionError hangingConnection) {
+            // Haengt die Datenbank mitten im Paket (sie antwortet nicht mehr, statt die
+            // Verbindung abzulehnen), wirft der PostgreSQL-Treiber keinen Fehler, sondern einen
+            // AssertionError. Spring Kafka haelt einen Error fuer toedlich und stoppt den
+            // Listener dauerhaft - der Dienst waere still weg. Deshalb machen wir daraus einen
+            // normalen Datenbankfehler: dann greift die Wiederholung aus Abschnitt 3.6 der
+            // Spezifikation, und der Dienst faengt sich von selbst wieder.
+            throw new DataAccessResourceFailureException(
+                    "Datenbank hat mitten im Paket nicht mehr geantwortet", hangingConnection);
+        }
         log.debug("{} Nachrichten gebuendelt geschrieben", messages.size());
     }
 

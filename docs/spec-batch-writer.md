@@ -141,6 +141,14 @@ Erkannt an jedem `DataAccessException`, der **keine** Ablehnung einer Zeile ist.
 - Der Rückstand ist als wachsender Consumer-Lag sichtbar.
 - Sobald die Datenbank zurück ist, läuft alles von selbst weiter — **kein Neustart von Hand**.
 
+**Sonderfall: die Datenbank hängt, statt abzulehnen.** Wird Postgres angehalten (`docker pause`)
+statt gestoppt, antwortet es gar nicht mehr. Der PostgreSQL-Treiber wirft dann mitten im Paket
+keinen Fehler, sondern einen `AssertionError`. Spring Kafka hält jeden `Error` für tödlich und
+**stoppt den Listener dauerhaft** — der Dienst wäre still weg, ohne Log-Zeile und ohne
+Wiederholung. `MessageWriter.insertBatch` fängt diesen Fall deshalb ab und macht daraus einen
+`DataAccessResourceFailureException`, also einen gewöhnlichen Datenbankfehler. Damit greift die
+Wiederholung oben. Belegt durch den Test `DatabaseOutageScenarioTest`.
+
 **Begründung:** Springs Standardverhalten gibt nach wenigen Versuchen auf und **überspringt** das
 Paket still. Das wäre genau der stille Datenverlust, den `PLANUNG.md` Abschnitt 2.4 ausschliesst.
 Zwei Zeitgrenzen sorgen dafür, dass ein Ausfall überhaupt als Fehler ankommt statt ewig zu hängen:

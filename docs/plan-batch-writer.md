@@ -9,9 +9,10 @@ Eltern-POM, die Namen aus der Aufgabenstellung, der Betrieb im Compose ohne offe
 Tests, die ihre Infrastruktur selbst mitbringen.
 
 **Warum diese Reihenfolge.** Erst die Bau- und Namensstruktur (Aufgabe 1), weil jeder weitere
-Schritt darauf aufsetzt. Dann die Schnittstelle nach aussen (2), dann die Tests (3) — sie sind das
-Netz für alles Folgende. Erst danach der Betrieb im Compose (4), weil sich die Szenarien ohne
-laufenden Stack nicht messen lassen, und zuletzt das Messwerkzeug (5) und die Dokumentation (6).
+Schritt darauf aufsetzt. Dann die Schnittstelle nach aussen (2), dann die Tests (3) und der Betrieb
+im Compose (4) — beide brauchen nichts voneinander und wurden deshalb parallel gebaut; im `git log`
+steht Compose zuerst, weil der Bau der Images länger lief als die Tests. Danach das Messwerkzeug
+(5), dann der beim Testen gefundene Fehler (6) und zuletzt die Dokumentation (7).
 
 ---
 
@@ -82,7 +83,20 @@ Zahlen für die Abnahmekriterien der Spezifikation.
 - **Test:** jedes Teilszenario meldet `BESTANDEN` mit gemessenem Wert
 - **Commit:** `test: Skript fuer die Szenarien S3 bis S7`
 
-## Aufgabe 6: Dokumentation nachführen
+## Aufgabe 6: Hängende Datenbank überlebt der Dienst ebenfalls
+
+**Warum erst hier:** Dieser Fall ist beim Schreiben des Ausfall-Tests (Aufgabe 3) aufgefallen und
+nicht vorher bekannt gewesen: Wird Postgres **angehalten** statt gestoppt, wirft der Treiber einen
+`AssertionError`, und Spring Kafka stoppt den Listener dauerhaft.
+
+- `MessageWriter.insertBatch` fängt den `AssertionError` ab und wirft einen
+  `DataAccessResourceFailureException` — damit ist es ein gewöhnlicher Datenbankfehler und die
+  Wiederholung greift
+- **Test:** `DatabaseOutageScenarioTest` hält die Datenbank an, lässt sie wieder laufen und prüft,
+  dass alle Nachrichten ankommen, ohne den Dienst neu zu starten
+- **Commit:** `fix(batch-writer): haengende Datenbank stoppt den Listener nicht mehr`
+
+## Aufgabe 7: Dokumentation nachführen
 
 - `README.md`: Tabelle «Stand» um den `batch-writer` ergänzen, Startanleitung auf Compose umstellen
 - `PLANUNG.md`: Topic-Namen und den Betrieb im Compose nachziehen
