@@ -25,7 +25,9 @@ import org.springframework.web.server.ResponseStatusException;
  * Was hier nicht beschrieben ist, taucht in der Dokumentation auch nicht auf.
  */
 @RestController
-@RequestMapping("/api/messages")
+// Beide Pfade zeigen auf dieselben Methoden: /messages ist der Pfad aus der Aufgabenstellung,
+// /api/messages war der erste und bleibt gueltig, damit bestehende Aufrufe weiter funktionieren.
+@RequestMapping({"/messages", "/api/messages"})
 @Tag(name = "Nachrichten", description = "Nachrichten senden und den Verlauf eines Raums lesen")
 public class MessageController {
 

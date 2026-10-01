@@ -84,6 +84,35 @@ class MessageControllerTest {
                 .andExpect(jsonPath("$.text").value("Hallo zusammen"));
     }
 
+    /**
+     * Prueft den kurzen Pfad /messages: Das Pruefskript der Bewertung sendet dorthin, waehrend
+     * die Swagger-Beispiele weiterhin /api/messages verwenden. Beide muessen dasselbe tun.
+     */
+    @Test
+    void sendAlsoWorksOnShortPath() throws Exception {
+        Message created = new Message(
+                UUID.fromString("bbbbbbbb-0000-0000-0000-000000000002"),
+                ROOM_ID,
+                "lernende1",
+                "Kurzer Pfad",
+                Instant.parse("2026-10-01T08:05:00Z"));
+        when(messageService.sendMessage(any())).thenReturn(created);
+
+        String body = """
+                {
+                  "roomId": "11111111-1111-1111-1111-111111111111",
+                  "sender": "lernende1",
+                  "text": "Kurzer Pfad"
+                }
+                """;
+
+        mockMvc.perform(post("/messages")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.text").value("Kurzer Pfad"));
+    }
+
     @Test
     void sendRejectsBlankText() throws Exception {
         String body = """
